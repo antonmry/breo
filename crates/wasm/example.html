@@ -187,8 +187,10 @@
             try {
                 const snapshot = window.repo.export_for_publish();
                 const parsed = JSON.parse(snapshot);
+                const PREVIEW_LENGTH = 500; // Character limit for preview
+                const preview = JSON.stringify(parsed, null, 2).substring(0, PREVIEW_LENGTH);
                 document.getElementById('export-output').innerHTML = 
-                    `✅ Snapshot exported<br><pre>${JSON.stringify(parsed, null, 2).substring(0, 500)}...</pre>`;
+                    `✅ Snapshot exported<br><pre>${preview}...</pre>`;
             } catch (err) {
                 document.getElementById('export-output').innerHTML = 
                     `❌ Error: ${err}`;
@@ -199,12 +201,14 @@
         window.createBackup = async function() {
             try {
                 const backup = window.repo.backup();
+                // backup() returns a JSON string
                 const blob = new Blob([backup], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = 'pds-backup.json';
                 a.click();
+                URL.revokeObjectURL(url); // Clean up
                 document.getElementById('export-output').innerHTML = 
                     `✅ Backup downloaded`;
             } catch (err) {
@@ -218,9 +222,10 @@
             try {
                 const did = window.repo.get_did();
                 const publicKey = window.repo.get_public_key();
+                const DISPLAY_KEY_LENGTH = 40; // Show first 40 chars of base64 key
                 document.getElementById('info-output').innerHTML = 
                     `DID: <code>${did || 'Not initialized'}</code><br>` +
-                    `Public Key: <code>${publicKey ? publicKey.substring(0, 40) + '...' : 'Not initialized'}</code>`;
+                    `Public Key: <code>${publicKey ? publicKey.substring(0, DISPLAY_KEY_LENGTH) + '...' : 'Not initialized'}</code>`;
             } catch (err) {
                 document.getElementById('info-output').innerHTML = 
                     `❌ Error: ${err}`;
