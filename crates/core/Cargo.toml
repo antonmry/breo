@@ -18,6 +18,7 @@ automerge = "0.6"
 sha2 = "0.10"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
+getrandom = { version = "0.2", features = ["js"] }
 
 # CID support
 multihash = "0.19"
