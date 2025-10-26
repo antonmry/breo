@@ -19,6 +19,7 @@ Thumbs.db
 dist/
 build/
 *.wasm
+pkg/
 
 # Dependencies
 node_modules/

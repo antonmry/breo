@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core"]
+members = ["crates/core", "crates/wasm"]
 resolver = "2"
 
 [workspace.package]
@@ -8,3 +8,11 @@ edition = "2021"
 license = "MIT"
 authors = ["pds-wasm contributors"]
 repository = "https://github.com/antonmry/pds-wasm"
+
+[profile.release]
+# Optimize for size (especially for WASM)
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
