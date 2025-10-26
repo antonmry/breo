@@ -9,8 +9,6 @@ import init, {
     get_did 
 } from 'pds-wasm';
 
-let initialized = false;
-
 // Helper to show status messages
 function showStatus(message, type = 'info') {
     const status = document.getElementById('status');
@@ -63,7 +61,6 @@ function displayIdentity(did) {
     didEl.textContent = `DID: ${did}`;
     didEl.style.display = 'block';
     document.getElementById('initBtn').style.display = 'none';
-    initialized = true;
 }
 
 // Show features once identity is initialized
@@ -77,14 +74,11 @@ function showFeatures() {
 // Save profile
 document.getElementById('saveProfileBtn').addEventListener('click', async () => {
     try {
-        const displayName = document.getElementById('displayName').value;
-        const description = document.getElementById('description').value;
+        const displayName = document.getElementById('displayName').value.trim() || null;
+        const description = document.getElementById('description').value.trim() || null;
         
         showStatus('Saving profile...', 'info');
-        await edit_profile(
-            displayName || null,
-            description || null
-        );
+        await edit_profile(displayName, description);
         showStatus('Profile saved!', 'success');
     } catch (error) {
         showStatus(`Error: ${error.message}`, 'error');
@@ -102,7 +96,9 @@ document.getElementById('createPostBtn').addEventListener('click', async () => {
         }
         
         showStatus('Creating post...', 'info');
-        await create_post(text, null);
+        // Second parameter is reply_to (null for top-level posts)
+        const NO_REPLY = null;
+        await create_post(text, NO_REPLY);
         document.getElementById('postText').value = '';
         showStatus('Post created!', 'success');
         loadPosts();
