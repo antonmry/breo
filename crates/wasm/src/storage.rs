@@ -91,16 +91,16 @@ mod tests {
     #[test]
     fn test_cache_operations() {
         let mut store = IndexedDbStore::new("test_db");
-        
+
         // Test put and get
         store.put("key1", b"value1").unwrap();
         let value = store.get("key1").unwrap();
         assert_eq!(value, Some(b"value1".to_vec()));
-        
+
         // Test exists
         assert!(store.exists("key1").unwrap());
         assert!(!store.exists("key2").unwrap());
-        
+
         // Test delete
         store.delete("key1").unwrap();
         assert!(!store.exists("key1").unwrap());

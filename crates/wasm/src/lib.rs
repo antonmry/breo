@@ -57,12 +57,14 @@ impl WasmRepository {
     #[wasm_bindgen]
     pub async fn init_identity(&mut self, did_str: String) -> std::result::Result<String, JsValue> {
         // Parse DID
-        let did = Did::new(did_str)
-            .map_err(|e| JsValue::from_str(&format!("Invalid DID: {}", e)))?;
+        let did =
+            Did::new(did_str).map_err(|e| JsValue::from_str(&format!("Invalid DID: {}", e)))?;
 
         // Create storage
         let mut store = IndexedDbStore::new("pds-repo");
-        store.init().await
+        store
+            .init()
+            .await
             .map_err(|e| JsValue::from_str(&format!("Storage init failed: {}", e)))?;
 
         // Create crypto
@@ -71,7 +73,7 @@ impl WasmRepository {
         // Create repository
         let clock = JsClock::new();
         let mut repo = Repository::new(did.clone(), store.clone(), clock, crypto.clone());
-        
+
         // Load existing data
         repo.load()
             .map_err(|e| JsValue::from_str(&format!("Failed to load repo: {}", e)))?;
@@ -88,7 +90,9 @@ impl WasmRepository {
     /// Returns the CID of the created record
     #[wasm_bindgen]
     pub async fn create_post(&mut self, text: String) -> std::result::Result<String, JsValue> {
-        let repo = self.repo.as_mut()
+        let repo = self
+            .repo
+            .as_mut()
             .ok_or_else(|| JsValue::from_str("Repository not initialized"))?;
 
         let collection = Nsid::new("app.bsky.feed.post")
@@ -102,12 +106,15 @@ impl WasmRepository {
             "createdAt": chrono::Utc::now().to_rfc3339(),
         });
 
-        let cid = repo.create_record(collection, rkey, value)
+        let cid = repo
+            .create_record(collection, rkey, value)
             .map_err(|e| JsValue::from_str(&format!("Failed to create post: {}", e)))?;
 
         // Flush to storage
         if let Some(store) = self.store.as_mut() {
-            store.flush().await
+            store
+                .flush()
+                .await
                 .map_err(|e| JsValue::from_str(&format!("Failed to flush: {}", e)))?;
         }
 
@@ -117,8 +124,14 @@ impl WasmRepository {
     /// Edit profile record
     /// Returns the CID of the updated profile
     #[wasm_bindgen]
-    pub async fn edit_profile(&mut self, display_name: String, description: String) -> std::result::Result<String, JsValue> {
-        let repo = self.repo.as_mut()
+    pub async fn edit_profile(
+        &mut self,
+        display_name: String,
+        description: String,
+    ) -> std::result::Result<String, JsValue> {
+        let repo = self
+            .repo
+            .as_mut()
             .ok_or_else(|| JsValue::from_str("Repository not initialized"))?;
 
         let collection = Nsid::new("app.bsky.actor.profile")
@@ -141,7 +154,9 @@ impl WasmRepository {
 
         // Flush to storage
         if let Some(store) = self.store.as_mut() {
-            store.flush().await
+            store
+                .flush()
+                .await
                 .map_err(|e| JsValue::from_str(&format!("Failed to flush: {}", e)))?;
         }
 
@@ -152,21 +167,25 @@ impl WasmRepository {
     /// Returns a JSON string of records
     #[wasm_bindgen]
     pub fn list_records(&self, collection_str: String) -> std::result::Result<String, JsValue> {
-        let repo = self.repo.as_ref()
+        let repo = self
+            .repo
+            .as_ref()
             .ok_or_else(|| JsValue::from_str("Repository not initialized"))?;
 
         let collection = Nsid::new(collection_str)
             .map_err(|e| JsValue::from_str(&format!("Invalid collection: {}", e)))?;
 
         let records = repo.list_records(&collection);
-        
+
         let records_json: Vec<serde_json::Value> = records
             .iter()
-            .map(|r| serde_json::json!({
-                "collection": r.collection.to_string(),
-                "rkey": r.rkey.to_string(),
-                "value": r.value,
-            }))
+            .map(|r| {
+                serde_json::json!({
+                    "collection": r.collection.to_string(),
+                    "rkey": r.rkey.to_string(),
+                    "value": r.value,
+                })
+            })
             .collect();
 
         serde_json::to_string(&records_json)
@@ -177,13 +196,16 @@ impl WasmRepository {
     /// Returns JSON string of the snapshot
     #[wasm_bindgen]
     pub fn export_for_publish(&self) -> std::result::Result<String, JsValue> {
-        let repo = self.repo.as_ref()
+        let repo = self
+            .repo
+            .as_ref()
             .ok_or_else(|| JsValue::from_str("Repository not initialized"))?;
 
         let snapshot = pds_core::snapshot::Snapshot::from_repo(repo)
             .map_err(|e| JsValue::from_str(&format!("Failed to create snapshot: {}", e)))?;
 
-        snapshot.to_json()
+        snapshot
+            .to_json()
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize snapshot: {}", e)))
     }
 
@@ -221,8 +243,8 @@ impl WasmRepository {
     #[wasm_bindgen]
     pub fn get_public_key(&self) -> Option<String> {
         self.crypto.as_ref().map(|c| {
+            use base64::{engine::general_purpose, Engine as _};
             use pds_core::traits::Crypto;
-            use base64::{Engine as _, engine::general_purpose};
             general_purpose::STANDARD.encode(c.public_key())
         })
     }
