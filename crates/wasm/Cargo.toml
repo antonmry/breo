@@ -1,0 +1,59 @@
+[package]
+name = "pds-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+pds-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+getrandom = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+uuid = { version = "1.18", features = ["v4", "js"] }
+async-trait = { workspace = true }
+
+[dependencies.web-sys]
+workspace = true
+features = [
+    "Window",
+    "Storage",
+    "Crypto",
+    "SubtleCrypto",
+    "CryptoKey",
+    "CryptoKeyPair",
+    "IdbFactory",
+    "IdbDatabase",
+    "IdbObjectStore",
+    "IdbTransaction",
+    "IdbRequest",
+    "IdbOpenDbRequest",
+    "IdbTransactionMode",
+    "IdbCursorWithValue",
+    "IdbKeyRange",
+    "DomException",
+    "Event",
+    "EventTarget",
+]
+
+[dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = true           # Enable Link Time Optimization
+codegen-units = 1    # Reduce code generation units for better optimization
+strip = true         # Strip symbols
+panic = "abort"      # Abort on panic (smaller binary)
