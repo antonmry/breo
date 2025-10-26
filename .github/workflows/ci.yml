@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test
+  test-rust:
+    name: Test Rust
     runs-on: ubuntu-latest
     
     steps:
@@ -57,6 +57,32 @@ jobs:
     
     - name: Run example
       run: cargo run --example basic_usage
+
+  test-webapp:
+    name: Test Webapp
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 'lts/*'
+        cache: 'npm'
+        cache-dependency-path: webapp/package-lock.json
+    
+    - name: Install dependencies
+      working-directory: webapp
+      run: npm ci
+    
+    - name: Check TypeScript
+      working-directory: webapp
+      run: npx tsc --noEmit
+    
+    - name: Build webapp
+      working-directory: webapp
+      run: npm run build
 
   coverage:
     name: Code Coverage

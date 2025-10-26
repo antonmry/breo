@@ -19,7 +19,10 @@
         "tamasfe.even-better-toml",
         "serayuzgur.crates",
         "vadimcn.vscode-lldb",
-        "usernamehw.errorlens"
+        "usernamehw.errorlens",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "bradlc.vscode-tailwindcss"
       ],
       "settings": {
         "rust-analyzer.checkOnSave.command": "clippy",
@@ -27,12 +30,18 @@
         "editor.defaultFormatter": "rust-lang.rust-analyzer",
         "[rust]": {
           "editor.defaultFormatter": "rust-lang.rust-analyzer"
+        },
+        "[typescript]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "[javascript]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
         }
       }
     }
   },
 
-  "postCreateCommand": "rustc --version && cargo --version",
+  "postCreateCommand": "rustc --version && cargo --version && node --version && npm --version",
   
   "remoteUser": "vscode",
   
