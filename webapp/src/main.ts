@@ -102,7 +102,14 @@ async function updateProfile() {
 async function loadFeed() {
   try {
     const records = repo?.list_records('app.bsky.feed.post');
-    const posts = JSON.parse(records || '[]');
+    let posts;
+    try {
+      posts = JSON.parse(records || '[]');
+    } catch (parseError) {
+      console.error('Failed to parse feed records:', parseError);
+      showError('Failed to parse feed data');
+      return;
+    }
     
     const feedContainer = document.getElementById('feed-container');
     if (!feedContainer) return;
@@ -216,7 +223,11 @@ async function publishToRemote() {
       return;
     }
     
-    // This is a placeholder - actual publishing would need proper ATProto endpoints
+    // TODO: Implement actual ATProto publishing via fetch() to remote PDS endpoints
+    // This would require:
+    // 1. Converting snapshot to CAR format
+    // 2. Proper ATProto authentication
+    // 3. API endpoints for createRecord, etc.
     showInfo(`Publishing to ${url}...\n\nNote: Remote publishing requires proper ATProto endpoint implementation.\nSnapshot ready for export.`);
     
     // Optionally download the snapshot for manual upload
