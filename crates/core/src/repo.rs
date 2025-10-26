@@ -6,6 +6,7 @@ use crate::traits::{Clock, Crypto, KvStore};
 use crate::types::{Cid, Commit, CommitOp, Did, Nsid, Record, RecordKey};
 
 /// Repository manages the append-only commit graph and current state
+#[allow(dead_code)]
 pub struct Repository<S: KvStore, Cl: Clock, Cr: Crypto> {
     /// The DID of this repository
     did: Did,
