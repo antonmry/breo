@@ -60,22 +60,31 @@ When desired, you can export and push signed records to any external ATProto PDS
 
 ## Quick Start (development)
 
+### Prerequisites
+- Rust (latest stable): https://rustup.rs/
+- wasm-pack: `cargo install wasm-pack`
+- Node.js v18+: https://nodejs.org/
+
+### Steps
+
 ```bash
-# build the core crate
+# 1. Build the core crate
 cd crates/core
 cargo test
 
-# build wasm bindings
+# 2. Build WASM bindings
 cd ../wasm
 wasm-pack build --target web
 
-# run the webapp
+# 3. Run the webapp
 cd ../../webapp
 npm install
 npm run dev
 ```
 
-Open http://localhost:5173 in a browser.
+Open http://localhost:5173 in your browser.
+
+See [docs/BUILD.md](docs/BUILD.md) for detailed documentation.
 
 ---
 
