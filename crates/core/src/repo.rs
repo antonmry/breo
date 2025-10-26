@@ -1,9 +1,9 @@
 //! Repository implementation with append-only commit graph
 
-use std::collections::HashMap;
 use crate::error::{Error, Result};
 use crate::traits::{Clock, Crypto, KvStore};
 use crate::types::{Cid, Commit, CommitOp, Did, Nsid, Record, RecordKey};
+use std::collections::HashMap;
 
 /// Repository manages the append-only commit graph and current state
 pub struct Repository<S: KvStore, Cl: Clock, Cr: Crypto> {
@@ -38,9 +38,9 @@ impl<S: KvStore, Cl: Clock, Cr: Crypto> Repository<S, Cl, Cr> {
     pub fn load(&mut self) -> Result<()> {
         // Load the head pointer
         if let Some(head_bytes) = self.store.get("head")? {
-            let head_str = String::from_utf8(head_bytes)
-                .map_err(|e| Error::StorageError(e.to_string()))?;
-            self.head = Some(Cid::from_str(head_str)?);
+            let head_str =
+                String::from_utf8(head_bytes).map_err(|e| Error::StorageError(e.to_string()))?;
+            self.head = Some(Cid::from_string(head_str)?);
         }
 
         // Load all records from storage
@@ -88,12 +88,8 @@ impl<S: KvStore, Cl: Clock, Cr: Crypto> Repository<S, Cl, Cr> {
         }
 
         // Create commit
-        let commit = self.create_commit(
-            CommitOp::Create,
-            collection,
-            rkey,
-            Some(record_cid.clone()),
-        )?;
+        let commit =
+            self.create_commit(CommitOp::Create, collection, rkey, Some(record_cid.clone()))?;
 
         // Store record and commit
         self.store_record(&record)?;
@@ -101,7 +97,8 @@ impl<S: KvStore, Cl: Clock, Cr: Crypto> Repository<S, Cl, Cr> {
 
         // Update head and cache
         self.head = Some(commit.cid()?);
-        self.store.put("head", self.head.as_ref().unwrap().as_str().as_bytes())?;
+        self.store
+            .put("head", self.head.as_ref().unwrap().as_str().as_bytes())?;
         self.records.insert(path, record);
 
         Ok(record_cid)
@@ -127,12 +124,8 @@ impl<S: KvStore, Cl: Clock, Cr: Crypto> Repository<S, Cl, Cr> {
         let record_cid = record.cid()?;
 
         // Create commit
-        let commit = self.create_commit(
-            CommitOp::Update,
-            collection,
-            rkey,
-            Some(record_cid.clone()),
-        )?;
+        let commit =
+            self.create_commit(CommitOp::Update, collection, rkey, Some(record_cid.clone()))?;
 
         // Store record and commit
         self.store_record(&record)?;
@@ -140,7 +133,8 @@ impl<S: KvStore, Cl: Clock, Cr: Crypto> Repository<S, Cl, Cr> {
 
         // Update head and cache
         self.head = Some(commit.cid()?);
-        self.store.put("head", self.head.as_ref().unwrap().as_str().as_bytes())?;
+        self.store
+            .put("head", self.head.as_ref().unwrap().as_str().as_bytes())?;
         self.records.insert(path, record);
 
         Ok(record_cid)
@@ -163,7 +157,8 @@ impl<S: KvStore, Cl: Clock, Cr: Crypto> Repository<S, Cl, Cr> {
 
         // Update head and cache
         self.head = Some(commit.cid()?);
-        self.store.put("head", self.head.as_ref().unwrap().as_str().as_bytes())?;
+        self.store
+            .put("head", self.head.as_ref().unwrap().as_str().as_bytes())?;
 
         // Remove from storage and cache
         self.store.delete(&format!("record:{}", path))?;
@@ -288,7 +283,9 @@ mod tests {
             "createdAt": "2025-01-01T00:00:00Z"
         });
 
-        let cid = repo.create_record(collection.clone(), rkey.clone(), value).unwrap();
+        let cid = repo
+            .create_record(collection.clone(), rkey.clone(), value)
+            .unwrap();
         assert!(cid.as_str().starts_with("bafy"));
 
         // Verify record was stored
@@ -310,14 +307,17 @@ mod tests {
         });
 
         // Create initial record
-        repo.create_record(collection.clone(), rkey.clone(), value1).unwrap();
+        repo.create_record(collection.clone(), rkey.clone(), value1)
+            .unwrap();
 
         // Update record
         let value2 = serde_json::json!({
             "text": "Updated hello!",
         });
 
-        let cid = repo.update_record(collection.clone(), rkey.clone(), value2.clone()).unwrap();
+        let cid = repo
+            .update_record(collection.clone(), rkey.clone(), value2.clone())
+            .unwrap();
         assert!(cid.as_str().starts_with("bafy"));
 
         // Verify record was updated
@@ -336,13 +336,15 @@ mod tests {
         });
 
         // Create record
-        repo.create_record(collection.clone(), rkey.clone(), value).unwrap();
+        repo.create_record(collection.clone(), rkey.clone(), value)
+            .unwrap();
 
         // Verify it exists
         assert!(repo.get_record(&collection, &rkey).is_some());
 
         // Delete record
-        repo.delete_record(collection.clone(), rkey.clone()).unwrap();
+        repo.delete_record(collection.clone(), rkey.clone())
+            .unwrap();
 
         // Verify it's gone
         assert!(repo.get_record(&collection, &rkey).is_none());
@@ -368,8 +370,8 @@ mod tests {
         assert_eq!(commits.len(), 3);
 
         // Verify commits are linked
-        for i in 1..commits.len() {
-            assert!(commits[i].prev.is_some());
+        for commit in commits.iter().skip(1) {
+            assert!(commit.prev.is_some());
         }
 
         // First commit has no parent
@@ -403,27 +405,28 @@ mod tests {
         let crypto = Ed25519Crypto::new();
 
         let mut repo = Repository::new(did, store, clock, crypto);
-        
+
         // Create a record
         let collection = Nsid::new("app.bsky.feed.post").unwrap();
         let rkey = RecordKey::new("test123");
         let value = serde_json::json!({
             "text": "Hello world!",
         });
-        repo.create_record(collection.clone(), rkey.clone(), value).unwrap();
-        
+        repo.create_record(collection.clone(), rkey.clone(), value)
+            .unwrap();
+
         // Verify head exists
         assert!(repo.get_head().is_some());
-        
+
         // Verify record exists
         let records = repo.list_records(&collection);
         assert_eq!(records.len(), 1);
-        
+
         // Reload from storage (tests internal persistence)
         let did2 = Did::new("did:plc:test123").unwrap();
         let store2 = MemoryKvStore::new();
         let mut repo2 = Repository::new(did2, store2, SystemClock, Ed25519Crypto::new());
-        
+
         // This tests that load() works even on empty repo
         assert!(repo2.load().is_ok());
         assert!(repo2.get_head().is_none()); // Empty repo has no head

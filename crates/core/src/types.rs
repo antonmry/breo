@@ -1,8 +1,8 @@
 //! Core data types for ATProto repository
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-use sha2::{Sha256, Digest};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 use crate::error::{Error, Result};
@@ -52,7 +52,7 @@ impl Cid {
     }
 
     /// Create a CID from a string
-    pub fn from_str(cid: impl Into<String>) -> Result<Self> {
+    pub fn from_string(cid: impl Into<String>) -> Result<Self> {
         let cid = cid.into();
         if !cid.starts_with("bafy") {
             return Err(Error::InvalidCid(format!("Invalid CID format: {}", cid)));
@@ -146,11 +146,7 @@ pub struct Record {
 
 impl Record {
     /// Create a new record
-    pub fn new(
-        collection: Nsid,
-        rkey: RecordKey,
-        value: serde_json::Value,
-    ) -> Self {
+    pub fn new(collection: Nsid, rkey: RecordKey, value: serde_json::Value) -> Self {
         Record {
             collection,
             rkey,
@@ -354,14 +350,7 @@ mod tests {
         assert!(invalid_commit.validate().is_err());
 
         // Delete can be without record_cid
-        let delete_commit = Commit::new(
-            did,
-            CommitOp::Delete,
-            collection,
-            rkey,
-            None,
-            None,
-        );
+        let delete_commit = Commit::new(did, CommitOp::Delete, collection, rkey, None, None);
         assert!(delete_commit.validate().is_ok());
     }
 }

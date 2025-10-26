@@ -1,10 +1,10 @@
 //! JSON snapshot serializer for repository export
 
-use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::repo::Repository;
 use crate::traits::{Clock, Crypto, KvStore};
 use crate::types::{Commit, Record};
+use serde::{Deserialize, Serialize};
 
 /// A complete repository snapshot for export/import
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +135,7 @@ impl CommitLog {
 mod tests {
     use super::*;
     use crate::traits::{Ed25519Crypto, MemoryKvStore, SystemClock};
-    use crate::types::{Nsid, RecordKey, Did};
+    use crate::types::{Did, Nsid, RecordKey};
 
     fn setup_repo() -> Repository<MemoryKvStore, SystemClock, Ed25519Crypto> {
         let did = Did::new("did:plc:test123").unwrap();

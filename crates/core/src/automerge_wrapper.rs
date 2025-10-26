@@ -1,11 +1,11 @@
 //! Automerge wrapper for mutable documents with CRDT support
 
-use automerge::{Automerge, ObjType, ReadDoc, transaction::Transactable};
-use serde_json::Value;
 use crate::error::{Error, Result};
+use automerge::{transaction::Transactable, Automerge, ObjType, ReadDoc};
+use serde_json::Value;
 
 /// Wrapper around an Automerge document for mutable records
-/// 
+///
 /// This provides a simplified JSON-compatible interface to Automerge
 /// for conflict-free replicated data types (CRDTs).
 #[derive(Debug, Clone)]
@@ -25,11 +25,11 @@ impl AutomergeDoc {
     }
 
     /// Create a document from JSON value
-    /// 
+    ///
     /// Note: This stores the JSON value and uses Automerge for merging
     pub fn from_json(value: &Value) -> Result<Self> {
         let mut doc = Automerge::new();
-        
+
         // For now, store as simple map at root for JSON objects
         if let Value::Object(map) = value {
             let mut tx = doc.transaction();
@@ -51,7 +51,7 @@ impl AutomergeDoc {
             tx.commit();
         }
 
-        Ok(AutomergeDoc { 
+        Ok(AutomergeDoc {
             doc,
             cached_json: Some(value.clone()),
         })
@@ -61,7 +61,7 @@ impl AutomergeDoc {
     pub fn load(bytes: &[u8]) -> Result<Self> {
         let doc = Automerge::load(bytes)
             .map_err(|e| Error::AutomergeError(format!("Failed to load document: {}", e)))?;
-        Ok(AutomergeDoc { 
+        Ok(AutomergeDoc {
             doc,
             cached_json: None,
         })
@@ -76,7 +76,7 @@ impl AutomergeDoc {
     pub fn update(&mut self, value: &Value) -> Result<()> {
         // Update cache
         self.cached_json = Some(value.clone());
-        
+
         // Update Automerge doc
         if let Value::Object(map) = value {
             let mut tx = self.doc.transaction();
@@ -97,7 +97,7 @@ impl AutomergeDoc {
             }
             tx.commit();
         }
-        
+
         Ok(())
     }
 
@@ -106,10 +106,10 @@ impl AutomergeDoc {
         if let Some(ref cached) = self.cached_json {
             return Ok(cached.clone());
         }
-        
+
         // Fallback: extract from Automerge
         let mut map = serde_json::Map::new();
-        
+
         // The Automerge 0.6 API returns Result for object_type
         if let Ok(obj_type) = self.doc.object_type(&automerge::ROOT) {
             if obj_type == ObjType::Map {
@@ -123,34 +123,40 @@ impl AutomergeDoc {
                 }
             }
         }
-        
+
         Ok(Value::Object(map))
     }
 
     /// Merge another document into this one
     pub fn merge(&mut self, other: &mut AutomergeDoc) -> Result<()> {
-        self.doc.merge(&mut other.doc)
+        self.doc
+            .merge(&mut other.doc)
             .map_err(|e| Error::AutomergeError(format!("Merge failed: {}", e)))?;
-        
+
         // Clear cache after merge
         self.cached_json = None;
-        
+
         Ok(())
     }
 
     /// Get the list of changes since the given heads
     pub fn get_changes(&self, have_deps: &[automerge::ChangeHash]) -> Vec<automerge::Change> {
-        self.doc.get_changes(have_deps).into_iter().cloned().collect()
+        self.doc
+            .get_changes(have_deps)
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Apply changes to the document
     pub fn apply_changes(&mut self, changes: Vec<automerge::Change>) -> Result<()> {
-        self.doc.apply_changes(changes)
+        self.doc
+            .apply_changes(changes)
             .map_err(|e| Error::AutomergeError(format!("Failed to apply changes: {}", e)))?;
-        
+
         // Clear cache after applying changes
         self.cached_json = None;
-        
+
         Ok(())
     }
 
@@ -164,16 +170,17 @@ impl AutomergeDoc {
         match scalar {
             automerge::ScalarValue::Bytes(b) => {
                 // Convert bytes to base64 string
-                Value::String(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b))
+                Value::String(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    b,
+                ))
             }
             automerge::ScalarValue::Str(s) => Value::String(s.to_string()),
             automerge::ScalarValue::Int(i) => Value::Number((*i).into()),
             automerge::ScalarValue::Uint(u) => Value::Number((*u).into()),
-            automerge::ScalarValue::F64(f) => {
-                serde_json::Number::from_f64(*f)
-                    .map(Value::Number)
-                    .unwrap_or(Value::Null)
-            }
+            automerge::ScalarValue::F64(f) => serde_json::Number::from_f64(*f)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
             automerge::ScalarValue::Counter(_c) => {
                 // Counter - just return 0 as we can't access internal value
                 Value::Number(0.into())
@@ -268,9 +275,13 @@ mod tests {
         doc1.merge(&mut doc2).unwrap();
 
         let result = doc1.to_json().unwrap();
-        
+
         // Both fields should be present after merge
-        assert!(result.get("name").is_some() || result.get("score").is_some() || result.get("level").is_some());
+        assert!(
+            result.get("name").is_some()
+                || result.get("score").is_some()
+                || result.get("level").is_some()
+        );
     }
 
     #[test]
