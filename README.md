@@ -43,8 +43,8 @@ When desired, you can export and push signed records to any external ATProto PDS
 - ✅ Automerge-backed conflict resolution for mutable docs  
 - ✅ Export / import backups  
 - ✅ Optional publish to remote PDS via `fetch()`  
+- ✅ UI for posts, profile, and backup management  
 - 🚧 Remote snapshot pull and merge  
-- 🚧 UI for posts, profile, and backup management  
 
 ---
 
