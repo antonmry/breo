@@ -1,25 +1,11 @@
-# Rust
-target/
-**/*.rs.bk
-*.pdb
-Cargo.lock
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
+/target/
+/output/
+/tools/
+*.mp4
+*.cuts.csv
+/markers.json
+/app.log
+/mpv.log
 .DS_Store
-Thumbs.db
-
-# Build artifacts
-dist/
-build/
-*.wasm
-pkg/
-
-# Dependencies
-node_modules/
+.claude
+.breo

@@ -1,18 +1,13 @@
-[workspace]
-members = ["crates/core", "crates/wasm"]
-resolver = "2"
-
-[workspace.package]
+[package]
+name = "breo"
 version = "0.1.0"
-edition = "2021"
-license = "MIT"
-authors = ["pds-wasm contributors"]
-repository = "https://github.com/antonmry/pds-wasm"
+edition = "2024"
 
-[profile.release]
-# Optimize for size (especially for WASM)
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+chrono = "0.4"
+skim = { version = "2.0.2", default-features = false }
+toml = "0.8"
