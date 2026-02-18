@@ -9,9 +9,33 @@ provides an automated implement/validate loop for agentic coding workflows.
 
 ## Installation
 
+### Quick install (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/antonmry/breo/main/install.sh | bash
+```
+
+This downloads the latest binary for your platform, installs it to
+`~/.local/bin`, and sets up shell completions.
+
+| Variable           | Default        | Description                |
+| ------------------ | -------------- | -------------------------- |
+| `BREO_INSTALL_DIR` | `~/.local/bin` | Where to put the binary    |
+| `BREO_VERSION`     | latest         | Version tag to install     |
+
+### With cargo-binstall
+
+```bash
+cargo binstall breo
+```
+
+### From source
+
 ```bash
 cargo install --path .
 ```
+
+Then set up shell completions manually (see [Shell Completion](#shell-completion)).
 
 ## Quick Start
 
@@ -34,15 +58,15 @@ breo -f src/main.rs "Review this code"
 
 ## Commands
 
-| Command                      | Description                                       |
-| ---------------------------- | ------------------------------------------------- |
-| `breo <message>`             | Send a message to the active conversation         |
-| `breo new <name>`            | Create a new conversation and switch to it        |
-| `breo list`                  | List all conversations for the current directory  |
-| `breo pick`                  | Fuzzy-pick a conversation (for shell integration) |
-| `breo status`                | Show active conversation, agent, and sandbox      |
-| `breo compact [name]`        | Summarize a conversation to save context          |
-| `breo setup <shell>`         | Print shell setup for TAB completion              |
+| Command                           | Description                                       |
+| --------------------------------- | ------------------------------------------------- |
+| `breo <message>`                  | Send a message to the active conversation         |
+| `breo new <name>`                 | Create a new conversation and switch to it        |
+| `breo list`                       | List all conversations for the current directory  |
+| `breo pick`                       | Fuzzy-pick a conversation (for shell integration) |
+| `breo status`                     | Show active conversation, agent, and sandbox      |
+| `breo compact [name]`             | Summarize a conversation to save context          |
+| `breo setup <shell>`              | Print shell setup for TAB completion              |
 | `breo loop <plan> <verification>` | Run an implement/validate loop                    |
 
 ## Options

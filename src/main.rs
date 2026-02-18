@@ -128,6 +128,7 @@ enum Backend {
 #[derive(Parser)]
 #[command(
     name = "breo",
+    version,
     about = "Chat with an LLM, keeping conversation in a markdown file"
 )]
 #[command(args_conflicts_with_subcommands = true)]

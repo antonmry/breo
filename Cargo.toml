@@ -3,6 +3,11 @@ name = "breo"
 version = "0.1.0"
 edition = "2024"
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/breo-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "breo"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
