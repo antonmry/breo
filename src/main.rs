@@ -194,8 +194,8 @@ enum Commands {
         /// Path to the plan file (instructions for the implementer)
         plan: PathBuf,
 
-        /// Path to the harness file (instructions for the validator)
-        harness: PathBuf,
+        /// Path to the verification file (instructions for the validator)
+        verification: PathBuf,
 
         /// Agent to use for the implementer
         #[arg(short, long, value_enum)]
@@ -792,6 +792,8 @@ fn execute_command_inner(
                 Ok(l) => {
                     if stream {
                         println!("{l}");
+                        use io::Write;
+                        let _ = io::stdout().flush();
                     }
                     stdout_buf.push_str(&l);
                     stdout_buf.push('\n');
@@ -1097,7 +1099,7 @@ fn cmd_send(
 #[allow(clippy::too_many_arguments)]
 fn cmd_loop(
     plan_path: &std::path::Path,
-    harness_path: &std::path::Path,
+    verification_path: &std::path::Path,
     target: Option<&str>,
     model: Option<&str>,
     backend: &Backend,
@@ -1107,15 +1109,15 @@ fn cmd_loop(
     sandbox: Option<&str>,
     push: bool,
 ) -> String {
-    // Validate that plan and harness files are readable
+    // Validate that plan and verification files are readable
     if let Err(e) = fs::metadata(plan_path) {
         eprintln!("Failed to read plan file {}: {e}", plan_path.display());
         std::process::exit(1);
     }
-    if let Err(e) = fs::metadata(harness_path) {
+    if let Err(e) = fs::metadata(verification_path) {
         eprintln!(
-            "Failed to read harness file {}: {e}",
-            harness_path.display()
+            "Failed to read verification file {}: {e}",
+            verification_path.display()
         );
         std::process::exit(1);
     }
@@ -1131,9 +1133,9 @@ fn cmd_loop(
     }
 
     eprintln!(
-        "[loop] Plan: {} | Harness: {}",
+        "[loop] Plan: {} | Verification: {}",
         plan_path.display(),
-        harness_path.display()
+        verification_path.display()
     );
     eprintln!("[loop] Result: RESULT.md");
     eprintln!(
@@ -1186,8 +1188,8 @@ fn cmd_loop(
              Then respond with:\n\
              - VERDICT: SUCCESS (if all criteria met)\n\
              - VERDICT: RETRY + FEEDBACK: ... (if not)\n\n\
-             Only return SUCCESS if the harness criteria are completely satisfied.",
-            harness_path.display()
+             Only return SUCCESS if the verification criteria are completely satisfied.",
+            verification_path.display()
         );
 
         let cmd = if let Some(vm) = sandbox {
@@ -1308,7 +1310,7 @@ fn main() {
             _,
             Some(Commands::Loop {
                 plan,
-                harness,
+                verification,
                 agent: loop_agent,
                 review_agent,
                 review_model,
@@ -1335,7 +1337,7 @@ fn main() {
             let target = conversation.as_deref().or(cli.conversation.as_deref());
             let name = cmd_loop(
                 &plan,
-                &harness,
+                &verification,
                 target,
                 model_ref,
                 &impl_be,

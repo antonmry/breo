@@ -43,7 +43,7 @@ breo -f src/main.rs "Review this code"
 | `breo status`                | Show active conversation, agent, and sandbox      |
 | `breo compact [name]`        | Summarize a conversation to save context          |
 | `breo setup <shell>`         | Print shell setup for TAB completion              |
-| `breo loop <plan> <harness>` | Run an implement/validate loop                    |
+| `breo loop <plan> <verification>` | Run an implement/validate loop                    |
 
 ## Options
 
@@ -160,11 +160,11 @@ The `loop` command runs an automated implement/validate cycle, useful for
 agentic coding workflows:
 
 ```bash
-breo loop PLAN.md HARNESS.md
+breo loop PLAN.md VERIFICATION.md
 ```
 
 - **PLAN.md** contains instructions for the implementer agent
-- **HARNESS.md** contains validation criteria for the reviewer agent
+- **VERIFICATION.md** contains validation criteria for the reviewer agent
 - A `RESULT.md` file is created in the current directory as the communication
   channel between agents
 
@@ -173,7 +173,7 @@ The loop repeats until the validator returns `VERDICT: SUCCESS`:
 ```text
 Implementer reads PLAN.md -> executes -> updates RESULT.md
     |
-Validator reviews RESULT.md against HARNESS.md -> verdict
+Validator reviews RESULT.md against VERIFICATION.md -> verdict
     |
     +-- SUCCESS: done
     +-- RETRY: implementer reads feedback from RESULT.md, tries again
