@@ -130,9 +130,11 @@ Conversation files use a simple format:
 # Conversation: rust-questions
 
 ## User
+
 What is Rust's ownership model?
 
 ## Assistant
+
 Rust's ownership model is...
 ```
 

@@ -1,0 +1,25 @@
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "cargo-fmt"
+name = "cargo fmt"
+language = "system"
+entry = "cargo fmt"
+types = ["rust"]
+pass_filenames = false
+
+[[repos.hooks]]
+id = "cargo-clippy"
+name = "cargo clippy"
+language = "system"
+entry = "cargo clippy --all-targets --all-features -- -D warnings"
+types = ["rust"]
+pass_filenames = false
+
+[[repos.hooks]]
+id = "rumdl"
+name = "rumdl"
+language = "system"
+entry = "rumdl check --fix"
+types = ["markdown"]
