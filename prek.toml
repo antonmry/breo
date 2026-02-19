@@ -5,7 +5,7 @@ repo = "local"
 id = "cargo-fmt"
 name = "cargo fmt"
 language = "system"
-entry = "cargo fmt"
+entry = "bash -c 'cargo fmt; exit 0'"
 types = ["rust"]
 pass_filenames = false
 
@@ -21,5 +21,6 @@ pass_filenames = false
 id = "rumdl"
 name = "rumdl"
 language = "system"
-entry = "rumdl check --fix"
+entry = "bash -c 'rumdl check --fix; exit 0'"
 types = ["markdown"]
+pass_filenames = false

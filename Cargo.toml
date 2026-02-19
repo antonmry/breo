@@ -2,6 +2,14 @@
 name = "breo"
 version = "0.1.0"
 edition = "2024"
+description = "A CLI tool for AI-assisted development workflows"
+license = "Apache-2.0"
+repository = "https://github.com/antonmry/breo"
+homepage = "https://github.com/antonmry/breo"
+readme = "README.md"
+keywords = ["cli", "ai", "llm", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["PLAN.md", "RESULT.md", "VERIFICATION.md", "TODO.md", ".github/", "prek.toml", ".rumdl.toml", "install.sh"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/breo-{ target }.tar.gz"
