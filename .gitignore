@@ -9,3 +9,5 @@
 .DS_Store
 .claude
 .breo
+.agents/
+skills-lock.json

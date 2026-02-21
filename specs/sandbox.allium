@@ -1,0 +1,110 @@
+-- allium: 1
+-- sandbox.allium
+
+-- Scope: Sandboxed execution of LLM backends via Lima VMs
+-- Includes: Sandbox validation, sandboxed command execution
+-- Excludes:
+--   - Lima VM creation or lifecycle management (external)
+--   - Conversation persistence (see conversation.allium)
+--   - Configuration cascade for sandbox selection (see shell-config.allium)
+-- Dependencies: Backend, Model from conversation.allium
+
+
+-- A sandbox environment for isolated LLM execution.
+-- Backed by a Lima VM instance.
+external entity Sandbox {
+    name: String
+    status: available | unavailable
+}
+
+
+-- ==========================================================================
+-- Sandbox validation
+-- ==========================================================================
+
+-- Before executing in a sandbox, verify it exists and is reachable.
+rule ValidateSandbox {
+    when: ValidateSandbox(sandbox)
+
+    requires: lima_available()
+    requires: sandbox.status = available
+
+    ensures: SandboxReady(sandbox)
+}
+
+-- Lima is not installed.
+rule LimaUnavailable {
+    when: ValidateSandbox(sandbox)
+
+    requires: not lima_available()
+
+    ensures: SandboxError(
+        sandbox: sandbox,
+        reason: "Lima not found. Install Lima or use --no-sandbox."
+    )
+}
+
+-- The named VM does not exist.
+rule SandboxNotFound {
+    when: ValidateSandbox(sandbox)
+
+    requires: lima_available()
+    requires: sandbox.status = unavailable
+
+    ensures: SandboxError(
+        sandbox: sandbox,
+        reason: "VM '" + sandbox.name + "' not found."
+    )
+}
+
+
+-- ==========================================================================
+-- Sandboxed execution
+-- ==========================================================================
+
+-- Execute a backend command inside a sandbox VM.
+-- Wraps the backend invocation with `limactl shell <vm>`.
+rule ExecuteInSandbox {
+    when: ExecuteInSandbox(sandbox, backend, model, prompt)
+
+    requires: sandbox.status = available
+
+    ensures: SandboxReady(sandbox)
+
+    let response = sandbox_execute(sandbox, backend, prompt, model)
+
+    ensures: ExecutionResult(
+        response: response,
+        sandboxed: true
+    )
+}
+
+-- Execute a backend command directly (no sandbox).
+rule ExecuteDirectly {
+    when: ExecuteDirectly(backend, model, prompt)
+
+    let response = backend.execute(prompt, model)
+
+    ensures: ExecutionResult(
+        response: response,
+        sandboxed: false
+    )
+}
+
+
+-- ==========================================================================
+-- Black boxes
+-- ==========================================================================
+
+deferred lima_available           -- check if limactl binary is present
+deferred sandbox_execute          -- run backend inside Lima VM via `limactl shell`
+
+
+-- ==========================================================================
+-- Resolved decisions
+-- ==========================================================================
+
+-- breo only validates that a Lima VM exists. VM lifecycle (start/stop/create)
+--   is managed by the user via the Lima CLI. Clean separation of concerns.
+-- Sandbox validation runs once per CLI invocation. No caching needed —
+--   breo is a CLI tool, each command is a single invocation.

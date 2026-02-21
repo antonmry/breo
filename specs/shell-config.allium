@@ -1,0 +1,224 @@
+-- allium: 1
+-- shell-config.allium
+
+-- Scope: Shell integration and configuration management
+-- Includes: Global config, per-directory state, resolution cascades,
+--           shell completions, fuzzy picker
+-- Excludes:
+--   - Conversation content and lifecycle (see conversation.allium)
+--   - Loop execution (see loop.allium)
+--   - Sandbox internals (see sandbox.allium)
+
+
+-- ==========================================================================
+-- Configuration
+-- ==========================================================================
+
+-- Global configuration: user preferences that apply across all directories.
+entity GlobalConfig {
+    sandbox_enabled: Boolean
+    sandbox_name: String
+    auto_push: Boolean
+    default_agent: claude | codex | gemini
+
+    -- defaults
+    default sandbox_enabled = true
+    default sandbox_name = "default"
+    default auto_push = true
+    default default_agent = claude
+}
+
+-- Per-directory state: overrides that apply to a specific working directory.
+entity DirectoryState {
+    directory: Directory
+    active_conversation: String?
+    agent: String?
+    model: String?
+    sandbox: String?
+    dir_id: String?
+}
+
+
+-- ==========================================================================
+-- Resolution cascades
+-- ==========================================================================
+
+-- Backend resolution: CLI flag > directory state > global config.
+-- This determines which LLM backend handles a command.
+rule ResolveBackend {
+    when: ResolveBackend(cli_agent, directory_state, global_config)
+
+    ensures: ResolvedBackend(
+        backend:
+            if cli_agent != null:
+                cli_agent
+            else if directory_state.agent != null:
+                directory_state.agent
+            else:
+                global_config.default_agent
+    )
+}
+
+-- Model resolution: CLI flag > directory state > backend default.
+-- Determines which specific model to use for a command.
+rule ResolveModel {
+    when: ResolveModel(cli_model, directory_state)
+
+    ensures: ResolvedModel(
+        model:
+            if cli_model != null:
+                cli_model
+            else if directory_state.model != null:
+                directory_state.model
+            else:
+                null    -- use backend default
+    )
+}
+
+-- Sandbox resolution: --no-sandbox > CLI --sandbox > directory state > global config.
+-- Determines whether and which sandbox to use.
+rule ResolveSandbox {
+    when: ResolveSandbox(no_sandbox, cli_sandbox, directory_state, global_config)
+
+    ensures: ResolvedSandbox(
+        sandbox:
+            if no_sandbox:
+                null
+            else if cli_sandbox != null:
+                cli_sandbox
+            else if directory_state.sandbox != null:
+                directory_state.sandbox
+            else if global_config.sandbox_enabled:
+                global_config.sandbox_name
+            else:
+                null
+    )
+}
+
+-- Push resolution: --no-push flag > global config.
+rule ResolvePush {
+    when: ResolvePush(no_push, global_config)
+
+    ensures: ResolvedPush(
+        push:
+            if no_push:
+                false
+            else:
+                global_config.auto_push
+    )
+}
+
+
+-- ==========================================================================
+-- State persistence
+-- ==========================================================================
+
+-- After sending a message or completing a loop, save the active settings
+-- back to directory state so they persist across invocations.
+rule PersistDirectoryState {
+    when: PersistDirectoryState(directory, conversation_name, backend_name, model_name, sandbox_name)
+
+    ensures: directory_state.active_conversation = conversation_name
+    ensures: directory_state.agent = backend_name
+    ensures: directory_state.model = model_name
+    ensures: directory_state.sandbox = sandbox_name
+}
+
+
+-- ==========================================================================
+-- Shell integration
+-- ==========================================================================
+
+-- Generate shell completion scripts for a given shell type.
+-- Outputs a script that integrates clap completions with fuzzy picking.
+value ShellType {
+    kind: bash | zsh | fish
+}
+
+rule GenerateCompletions {
+    when: GenerateCompletions(shell_type)
+
+    ensures: CompletionScript(
+        shell: shell_type,
+        content: generate_completion_script(shell_type)
+    )
+}
+
+-- Fuzzy picker for conversation selection.
+-- Presents all conversations in the current directory with the active one marked.
+rule FuzzyPickConversation {
+    when: FuzzyPickConversation(directory)
+
+    requires: directory.conversations.count > 0
+
+    let items = directory.conversations
+        .sorted_by_name
+        .map(c =>
+            if c = directory.active_conversation:
+                "* " + c.name
+            else:
+                "  " + c.name
+        )
+
+    ensures: PickerPresented(items: items)
+}
+
+-- User selects a conversation from the picker.
+-- The picker updates directory state directly (calls set_active).
+rule ConversationPicked {
+    when: ConversationPicked(directory, selected_name)
+
+    requires: exists Conversation with directory = directory and name = selected_name
+
+    ensures: directory.active_conversation = Conversation with name = selected_name
+    ensures: StateCommitted(directory)
+}
+
+
+-- ==========================================================================
+-- Status display
+-- ==========================================================================
+
+-- Show the current directory's active settings.
+rule ShowStatus {
+    when: ShowStatus(directory)
+
+    let state = DirectoryState with directory = directory
+
+    ensures: StatusReport(
+        directory_path: directory.path,
+        config_path: breo_config_dir,
+        conversations_path: directory_conversations_path,
+        active_conversation: state.active_conversation,
+        agent: state.agent,
+        model: state.model,
+        sandbox: state.sandbox
+    )
+}
+
+
+-- ==========================================================================
+-- Black boxes
+-- ==========================================================================
+
+deferred generate_completion_script    -- shell-specific completion script generation
+deferred breo_config_dir               -- ~/.config/breo
+deferred directory_conversations_path  -- ~/.config/breo/conversations/<dir-id>
+
+
+-- ==========================================================================
+-- Resolved decisions
+-- ==========================================================================
+
+-- Per-directory state now includes a preferred model (in addition to agent).
+--   Resolution cascade: CLI --model > directory state > backend default.
+-- Fuzzy picker filters by conversation name only. Content search is out of scope.
+-- No per-directory config files. Global config (~/.config/breo/config.toml) only.
+
+-- ==========================================================================
+-- Feature gap
+-- ==========================================================================
+
+-- Conversation renaming is not yet supported but is needed.
+-- Users should be able to rename a conversation without losing history or
+-- breaking the active conversation reference.

@@ -1,0 +1,295 @@
+-- allium: 1
+-- conversation.allium
+
+-- Scope: Conversation lifecycle, message exchange, compaction, and git versioning
+-- Includes: Conversation, Exchange, Directory, context tracking, git persistence
+-- Excludes:
+--   - Implement/validate loop (see loop.allium)
+--   - Sandbox execution (see sandbox.allium)
+--   - Shell integration and configuration (see shell-config.allium)
+
+
+-- A working directory that scopes conversations.
+-- Each directory gets a stable identifier derived from its path.
+entity Directory {
+    path: String
+    id: DirectoryId
+    active_conversation: Conversation?
+
+    conversations: Conversation with directory = this
+}
+
+-- Stable identifier for a directory, survives path changes.
+-- Derived from the directory basename, with hash suffix on collision.
+value DirectoryId {
+    value: String
+}
+
+-- A persistent, versioned conversation with an LLM agent.
+-- Stored as a markdown file scoped to a directory.
+entity Conversation {
+    name: String
+    directory: Directory
+    exchanges: List<Exchange>
+    content: String
+
+    -- Derived
+    exchange_count: exchanges.count
+    estimated_tokens: content.length / 4
+    is_empty: exchanges.count = 0
+}
+
+-- A single turn in a conversation: one user message and one assistant response.
+value Exchange {
+    user_message: String
+    assistant_response: String
+    attachments: List<FileAttachment>
+}
+
+-- A file attached to a message for additional context.
+value FileAttachment {
+    path: String
+    content: String
+}
+
+-- An LLM backend that executes prompts.
+external entity Backend {
+    name: String                                     -- claude, codex, gemini
+}
+
+-- A specific model offered by a backend.
+external entity Model {
+    name: String
+    context_window: Integer                          -- max tokens
+}
+
+config {
+    auto_push: Boolean = true
+}
+
+
+-- ==========================================================================
+-- Directory resolution
+-- ==========================================================================
+
+-- When a directory is first used, it gets a stable identifier.
+rule AssignDirectoryId {
+    when: AssignDirectoryId(directory)
+
+    requires: directory.id = null
+
+    let basename = sanitize(directory.path)
+
+    ensures:
+        if no existing Directory with id.value = basename:
+            directory.id = DirectoryId(value: basename)
+        else if existing Directory with id.value = basename and path = directory.path:
+            directory.id = DirectoryId(value: basename)
+        else:
+            directory.id = DirectoryId(value: basename + "-" + hash(directory.path))
+}
+
+
+-- ==========================================================================
+-- Conversation lifecycle
+-- ==========================================================================
+
+-- Creating a new named conversation and switching to it.
+rule CreateConversation {
+    when: CreateConversation(directory, name)
+
+    requires: not exists Conversation with directory = directory and name = name
+
+    ensures: Conversation.created(
+        name: name,
+        directory: directory,
+        exchanges: [],
+        content: "# Conversation: " + name
+    )
+    ensures: directory.active_conversation = Conversation with name = name
+    ensures: StateCommitted(directory)
+}
+
+-- Resolving which conversation is active when none is explicitly set.
+-- Tries three strategies in order: explicit, latest, auto-create.
+rule ResolveActiveConversation {
+    when: ResolveActiveConversation(directory)
+
+    requires: directory.active_conversation = null
+
+    let latest = directory.conversations.latest_by_name
+
+    ensures:
+        if latest != null:
+            directory.active_conversation = latest
+        else:
+            let name = timestamp_name()
+            ensures: Conversation.created(
+                name: name,
+                directory: directory,
+                exchanges: [],
+                content: "# Conversation: " + name
+            )
+            ensures: directory.active_conversation = Conversation with name = name
+}
+
+-- Switching the active conversation to an existing one.
+rule SwitchConversation {
+    when: SwitchConversation(directory, name)
+
+    requires: exists Conversation with directory = directory and name = name
+
+    ensures: directory.active_conversation = Conversation with name = name
+    ensures: StateCommitted(directory)
+}
+
+
+-- ==========================================================================
+-- Message exchange
+-- ==========================================================================
+
+-- Sending a message to a conversation and receiving a response.
+-- This is the core interaction: append user message, invoke backend, append response.
+rule SendMessage {
+    when: SendMessage(directory, conversation_name, message, model, backend, attachments)
+
+    let conversation = Conversation with directory = directory and name = conversation_name
+
+    -- Lazily create the conversation if it doesn't exist
+    ensures:
+        if conversation = null:
+            Conversation.created(
+                name: conversation_name,
+                directory: directory,
+                exchanges: [],
+                content: "# Conversation: " + conversation_name
+            )
+
+    let full_prompt = conversation.content + "## User\n" + message + format_attachments(attachments)
+    let response = backend.execute(full_prompt, model)
+
+    ensures: Exchange.created(
+        user_message: message,
+        assistant_response: response,
+        attachments: attachments
+    )
+    ensures: conversation.exchanges = conversation.exchanges + [new_exchange]
+    ensures: conversation.content = full_prompt + "\n## Assistant\n" + response
+    ensures: ConversationCommitted(conversation, "message to '" + conversation_name + "'")
+
+    -- Update directory state after sending
+    ensures: directory.active_conversation = conversation
+    ensures: StateCommitted(directory)
+}
+
+-- After each message, report context usage to the user.
+rule ReportContextUsage {
+    when: _: Exchange.created
+
+    let conversation = exchange.conversation
+    let window = conversation_model.context_window
+    let used = conversation.estimated_tokens
+    let remaining = window - used
+    let pct_used = used / window * 100
+
+    ensures: ContextReport(
+        conversation: conversation,
+        exchanges: conversation.exchange_count,
+        tokens_used: used,
+        tokens_remaining: remaining,
+        pct_used: pct_used
+    )
+}
+
+
+-- ==========================================================================
+-- Compaction
+-- ==========================================================================
+
+-- Compacting a conversation by summarizing its content to reclaim context space.
+-- Always uses Claude as the compaction backend regardless of active backend.
+rule CompactConversation {
+    when: CompactConversation(directory, conversation_name)
+
+    let conversation = Conversation with directory = directory and name = conversation_name
+
+    requires: conversation != null
+    requires: conversation.exchange_count > 0
+
+    let tokens_before = conversation.estimated_tokens
+    let summary = summarize(conversation.content)
+
+    ensures: conversation.content = summary
+    ensures: conversation.exchanges = []
+    ensures: ConversationCommitted(conversation, "compact '" + conversation_name + "'")
+
+    -- Report savings
+    let tokens_after = conversation.estimated_tokens
+    let saved = tokens_before - tokens_after
+    ensures: CompactionReport(
+        conversation: conversation,
+        exchanges_before: conversation.exchange_count,
+        tokens_before: tokens_before,
+        tokens_after: tokens_after,
+        tokens_saved: saved
+    )
+}
+
+-- Compaction goal: maximum information density. Flatten to prose, not preserve
+-- exchange structure. Prioritise recent exchanges but retain important context
+-- from earlier ones (decisions, code snippets, error resolutions).
+deferred summarize    -- LLM summarization: prose summary, weighted toward recent exchanges
+
+
+-- ==========================================================================
+-- Git versioning
+-- ==========================================================================
+
+-- Every conversation mutation is committed to git.
+rule CommitConversation {
+    when: ConversationCommitted(conversation, message)
+
+    ensures: GitCommit(
+        scope: conversations,
+        message: "breo: " + message
+    )
+    ensures:
+        if config.auto_push:
+            GitPush()
+}
+
+-- State changes (active conversation, agent, sandbox) are committed separately.
+rule CommitState {
+    when: StateCommitted(directory)
+
+    ensures: GitCommit(
+        scope: state,
+        message: "breo: update state"
+    )
+    ensures:
+        if config.auto_push:
+            GitPush()
+}
+
+
+-- ==========================================================================
+-- Black boxes
+-- ==========================================================================
+
+deferred backend.execute             -- LLM prompt execution, returns response text
+deferred sanitize                    -- Path sanitization: keep alphanumeric, dash, underscore, dot
+deferred hash                        -- Short hash for collision avoidance
+deferred timestamp_name              -- Generate timestamp-based name (YYYY-MM-DD_HH-MM-SS)
+deferred format_attachments          -- Format file attachments as markdown code blocks
+
+
+-- ==========================================================================
+-- Resolved decisions
+-- ==========================================================================
+
+-- Compaction flattens to prose for maximum information density.
+--   Recent exchanges are weighted heavily but important earlier context is preserved.
+-- Context tracking uses conversation content only (no system prompt overhead).
+--   Each backend injects its own system prompt; there is no way to measure it.
+-- Lazy migration from flat to scoped storage has been removed.
+--   All conversations use per-directory scoped folders.

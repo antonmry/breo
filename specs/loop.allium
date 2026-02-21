@@ -1,0 +1,199 @@
+-- allium: 1
+-- loop.allium
+
+-- Scope: Implement/validate loop — iterative agent workflow
+-- Includes: Loop lifecycle, implementer/validator roles, verdict parsing, RESULT.md
+-- Excludes:
+--   - Conversation persistence (see conversation.allium)
+--   - Sandbox execution (see sandbox.allium)
+--   - Configuration and shell integration (see shell-config.allium)
+-- Dependencies: Conversation, Backend, Model from conversation.allium
+
+
+-- A single run of the implement/validate loop.
+-- The loop alternates between an implementer agent executing a plan
+-- and a validator agent checking results against verification criteria.
+entity Loop {
+    plan: Plan
+    verification: Verification
+    result: Result
+    implementer: Backend
+    validator: Backend
+    implementer_model: Model?
+    validator_model: Model?
+    conversation: Conversation
+    status: running | succeeded | failed
+
+    -- Derived
+    current_attempt: result.attempts.count
+}
+
+-- The implementation plan: instructions for the implementer agent.
+external entity Plan {
+    path: String
+    content: String
+}
+
+-- The verification criteria: acceptance criteria for the validator.
+external entity Verification {
+    path: String
+    content: String
+}
+
+-- The shared result file used for inter-agent communication.
+-- Both implementer and validator read from and write to this file.
+entity Result {
+    attempts: List<Attempt>
+    final_status: String?
+}
+
+-- A single attempt within the loop: implementation work + validator review.
+value Attempt {
+    number: Integer
+    implementation_summary: String?
+    verdict: success | retry?
+    feedback: String?
+}
+
+-- The validator's verdict after reviewing an attempt.
+value Verdict {
+    outcome: success | retry
+    feedback: String?
+}
+
+
+-- ==========================================================================
+-- Loop lifecycle
+-- ==========================================================================
+
+-- Starting the implement/validate loop.
+-- Validates inputs, initialises RESULT.md, and runs the first attempt.
+rule StartLoop {
+    when: StartLoop(plan, verification, implementer, validator, implementer_model, validator_model, conversation)
+
+    requires: plan.content != null
+    requires: verification.content != null
+
+    ensures: Result.created(
+        attempts: [],
+        final_status: null
+    )
+    ensures: Loop.created(
+        plan: plan,
+        verification: verification,
+        result: new_result,
+        implementer: implementer,
+        validator: validator,
+        implementer_model: implementer_model,
+        validator_model: validator_model,
+        conversation: conversation,
+        status: running
+    )
+    ensures: RunImplementer(loop, 1)
+}
+
+-- The implementer agent executes the plan.
+-- On the first attempt, it reads the plan directly.
+-- On retries, it also reads validator feedback from RESULT.md.
+rule RunImplementer {
+    when: RunImplementer(loop, attempt_number)
+
+    requires: loop.status = running
+
+    let message =
+        if attempt_number = 1:
+            "Read the implementation plan from " + loop.plan.path + " and follow the instructions."
+        else:
+            "Read the implementation plan from " + loop.plan.path + ". " +
+            "Check RESULT.md for validator feedback on previous attempts and address it."
+
+    -- Implementer executes via the conversation (reuses SendMessage from conversation.allium)
+    ensures: MessageSent(loop.conversation, message, loop.implementer, loop.implementer_model)
+
+    -- After implementation, trigger validation
+    ensures: RunValidator(loop, attempt_number)
+}
+
+-- The validator agent reviews the implementation against verification criteria.
+-- It reads RESULT.md and the verification file, then renders a verdict.
+-- The validator shares the same conversation as the implementer (via SendMessage).
+rule RunValidator {
+    when: RunValidator(loop, attempt_number)
+
+    requires: loop.status = running
+
+    let review_prompt =
+        "Review the implementation against criteria in " + loop.verification.path + ". " +
+        "Read RESULT.md for implementation progress. " +
+        "Respond with VERDICT: SUCCESS or VERDICT: RETRY + FEEDBACK: ..."
+
+    -- Validator executes via the shared conversation (reuses SendMessage from conversation.allium)
+    ensures: MessageSent(loop.conversation, review_prompt, loop.validator, loop.validator_model)
+
+    let response = loop.conversation.exchanges.last.assistant_response
+    let verdict = parse_verdict(response)
+
+    ensures: Attempt.created(
+        number: attempt_number,
+        verdict: verdict.outcome,
+        feedback: verdict.feedback
+    )
+    ensures: loop.result.attempts = loop.result.attempts + [new_attempt]
+
+    ensures:
+        if verdict.outcome = success:
+            LoopSucceeded(loop, attempt_number)
+        else:
+            LoopRetry(loop, attempt_number, verdict.feedback)
+}
+
+
+-- ==========================================================================
+-- Loop outcomes
+-- ==========================================================================
+
+-- The validator approved the implementation.
+rule LoopSucceeded {
+    when: LoopSucceeded(loop, attempt_number)
+
+    ensures: loop.status = succeeded
+    ensures: loop.result.final_status =
+        "Completed successfully after " + attempt_number + " attempt(s)."
+}
+
+-- The validator requested changes. Trigger another implementer attempt.
+rule LoopRetry {
+    when: LoopRetry(loop, attempt_number, feedback)
+
+    requires: loop.status = running
+
+    ensures: RunImplementer(loop, attempt_number + 1)
+}
+
+
+-- ==========================================================================
+-- Verdict parsing
+-- ==========================================================================
+
+-- Parse the validator's response into a structured verdict.
+-- Looks for "VERDICT: SUCCESS" or "VERDICT: RETRY" with optional "FEEDBACK: ..."
+-- If neither marker is found, treats the entire response as retry feedback.
+deferred parse_verdict    -- see: verdict parsing logic in main.rs
+
+
+-- ==========================================================================
+-- Resolved decisions
+-- ==========================================================================
+
+-- No maximum attempt limit. The loop runs until SUCCESS or user interrupts (Ctrl-C).
+-- Implementer and validator share the same conversation (one conversation per feature).
+-- RESULT.md is always in the working directory. It is ephemeral, not a persistent artifact.
+
+-- ==========================================================================
+-- Known issue
+-- ==========================================================================
+
+-- The validator tends to approve too early without properly testing the feature.
+-- Sharing the conversation context (so the validator sees implementer reasoning)
+-- helps, but the verdict protocol may still need strengthening to require
+-- the validator to demonstrate that acceptance criteria were actually verified.

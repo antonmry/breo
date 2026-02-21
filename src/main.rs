@@ -44,6 +44,7 @@ fn load_config() -> Config {
 struct DirState {
     conversation: Option<String>,
     agent: Option<String>,
+    model: Option<String>,
     sandbox: Option<String>,
     dir_id: Option<String>,
 }
@@ -136,7 +137,7 @@ struct Cli {
     /// The message to send
     message: Option<String>,
 
-    /// Send to a specific conversation without switching the active one
+    /// Send to a specific conversation and switch to it
     #[arg(short, long, add = ArgValueCandidates::new(list_conversations))]
     conversation: Option<String>,
 
@@ -280,20 +281,13 @@ fn ensure_breo_dir() {
 fn get_active() -> String {
     let state = load_dir_state();
 
-    // 1. If explicitly set in state, use it (with lazy migration)
+    // 1. If explicitly set in state, use it
     if let Some(ref name) = state.conversation {
         let scoped = dir_conversations_dir().join(format!("{name}.md"));
         if scoped.exists() {
             return name.clone();
         }
-        // Lazy migration: check old flat location
-        let flat = conversations_dir().join(format!("{name}.md"));
-        if flat.exists() {
-            ensure_dir_conversations_dir();
-            let _ = fs::copy(&flat, &scoped);
-            return name.clone();
-        }
-        // Name set but file doesn't exist anywhere — fall through
+        // Name set but file doesn't exist — fall through
     }
 
     // 2. Resume the latest conversation in this dir's subfolder
@@ -550,6 +544,7 @@ fn cmd_pick() {
             .trim_start_matches("* ")
             .trim_start()
             .to_string();
+        set_active(&name);
         print!("{name}");
     }
 }
@@ -592,12 +587,14 @@ fn cmd_status() {
     let active = get_active();
     let state = load_dir_state();
     let agent = state.agent.as_deref().unwrap_or("(not set)");
+    let model = state.model.as_deref().unwrap_or("(default)");
     let sandbox = state.sandbox.as_deref().unwrap_or("(not set)");
     println!("directory:    {}", current_dir_key());
     println!("config:       {}", breo_dir().display());
     println!("conversations:{}", dir_conversations_dir().display());
     println!("conversation: {active}");
     println!("agent:        {agent}");
+    println!("model:        {model}");
     println!("sandbox:      {sandbox}");
 }
 
@@ -827,15 +824,6 @@ fn execute_command(
     execute_command_inner(cmd, prompt, sandboxed, backend, true)
 }
 
-fn execute_command_quiet(
-    cmd: Command,
-    prompt: &str,
-    sandboxed: bool,
-    backend: &Backend,
-) -> (String, String, bool) {
-    execute_command_inner(cmd, prompt, sandboxed, backend, false)
-}
-
 fn backend_name(backend: &Backend) -> &'static str {
     match backend {
         Backend::Claude => "claude",
@@ -1041,7 +1029,8 @@ fn truncate_display(s: &str, max: usize) -> String {
     }
 }
 
-fn cmd_send(
+#[allow(clippy::too_many_arguments)]
+fn cmd_send_inner(
     message: &str,
     target: Option<&str>,
     model: Option<&str>,
@@ -1049,7 +1038,8 @@ fn cmd_send(
     files: &[PathBuf],
     sandbox: Option<&str>,
     push: bool,
-) -> String {
+    stream: bool,
+) -> (String, String, bool) {
     ensure_breo_dir();
     let active = get_active();
     let name = target.unwrap_or(&active);
@@ -1070,16 +1060,11 @@ fn cmd_send(
     } else {
         build_command(backend, model)
     };
-    let (stdout, stderr, success) = execute_command(cmd, &prompt, sandbox.is_some(), backend);
+    let (stdout, stderr, success) =
+        execute_command_inner(cmd, &prompt, sandbox.is_some(), backend, stream);
 
     if !success {
-        let label = if sandbox.is_some() {
-            "limactl"
-        } else {
-            backend_name(backend)
-        };
-        eprintln!("{label} failed: {stderr}");
-        std::process::exit(1);
+        return (name.to_string(), stderr, false);
     }
 
     let response = stdout.trim_end();
@@ -1094,7 +1079,30 @@ fn cmd_send(
 
     print_context_summary(&content, name, model, backend, &path);
 
-    name.to_string()
+    (name.to_string(), response.to_string(), true)
+}
+
+fn cmd_send(
+    message: &str,
+    target: Option<&str>,
+    model: Option<&str>,
+    backend: &Backend,
+    files: &[PathBuf],
+    sandbox: Option<&str>,
+    push: bool,
+) -> String {
+    let (name, stderr, success) =
+        cmd_send_inner(message, target, model, backend, files, sandbox, push, true);
+    if !success {
+        let label = if sandbox.is_some() {
+            "limactl"
+        } else {
+            backend_name(backend)
+        };
+        eprintln!("{label} failed: {stderr}");
+        std::process::exit(1);
+    }
+    name
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1176,7 +1184,7 @@ fn cmd_loop(
     loop {
         eprintln!("\n[loop] Reviewing attempt {iteration}...");
 
-        // Build and execute review via cmd_send to the reviewer
+        // Validator shares the same conversation as the implementer
         let review_message = format!(
             "You are a validator reviewing an implementation attempt.\n\n\
              Read the acceptance criteria from {}.\n\
@@ -1193,13 +1201,16 @@ fn cmd_loop(
             verification_path.display()
         );
 
-        let cmd = if let Some(vm) = sandbox {
-            build_sandbox_command(vm, review_backend, review_model)
-        } else {
-            build_command(review_backend, review_model)
-        };
-        let (stdout, stderr, success) =
-            execute_command_quiet(cmd, &review_message, sandbox.is_some(), review_backend);
+        let (_, response_or_err, success) = cmd_send_inner(
+            &review_message,
+            Some(&name),
+            review_model,
+            review_backend,
+            &[],
+            sandbox,
+            push,
+            false,
+        );
 
         if !success {
             let label = if sandbox.is_some() {
@@ -1207,12 +1218,12 @@ fn cmd_loop(
             } else {
                 backend_name(review_backend)
             };
-            eprintln!("{label} failed during review: {stderr}");
+            eprintln!("{label} failed during review: {response_or_err}");
             eprintln!("[loop] Stopping due to review error. Conversation: {name}");
             return name;
         }
 
-        let response = stdout.trim();
+        let response = response_or_err.trim();
         match parse_review(response) {
             ReviewVerdict::Success => {
                 // Append final status to RESULT.md
@@ -1291,10 +1302,14 @@ fn main() {
 
     let push = if cli.no_push { false } else { config.push };
 
+    // Model resolution: CLI --model > directory state > backend default (None)
+    let resolved_model: Option<String> = cli.model.clone().or_else(|| dir_state.model.clone());
+
     let save_after_send = |conversation: &str| {
         let mut state = load_dir_state();
         state.conversation = Some(conversation.to_string());
         state.agent = Some(backend_name(&backend).to_string());
+        state.model = resolved_model.clone();
         state.sandbox = sandbox.map(String::from);
         save_dir_state(&state);
         git_commit_state(push);
@@ -1332,7 +1347,7 @@ fn main() {
             let loop_sandbox_ref = loop_sandbox_name.as_deref();
 
             let impl_be = loop_agent.unwrap_or_else(|| backend.clone());
-            let model_ref = cli.model.as_deref();
+            let model_ref = resolved_model.as_deref();
             let review_model_ref = review_model.as_deref().or(model_ref);
             let review_be = review_agent.unwrap_or_else(|| impl_be.clone());
             let target = conversation.as_deref().or(cli.conversation.as_deref());
@@ -1354,7 +1369,7 @@ fn main() {
             let name = cmd_send(
                 &message,
                 cli.conversation.as_deref(),
-                cli.model.as_deref(),
+                resolved_model.as_deref(),
                 &backend,
                 &cli.files,
                 sandbox,
@@ -1372,7 +1387,7 @@ fn main() {
                     let name = cmd_send(
                         input,
                         cli.conversation.as_deref(),
-                        cli.model.as_deref(),
+                        resolved_model.as_deref(),
                         &backend,
                         &cli.files,
                         sandbox,
