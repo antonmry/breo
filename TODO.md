@@ -1,5 +1,15 @@
 # TODO
 
+- [ ] Claws: support loop command
+- [ ] Better track of progress?
+- [ ] Specs: with Allium?
+- [ ] Specs: one crate per spec
+- [ ] Specs: TTS and STT
+- [ ] Paste images
+- [ ] Skills?
+- [ ] MCP? Other features?
+- [ ] Z behaviour to navigate conversations
+- [ ] Sandboxing with <https://github.com/boxlite-ai/boxlite>
 - [x] Auto-completion
 - [x] Compaction
 - [x] It should work with gemini
@@ -8,14 +18,4 @@
 - [x] Install via curl and cargo binary
 - [x] Able to select the model
 - [x] Claws
-- [ ] Specs: with Allium?
-- [ ] Specs: one crate per spec
-- [ ] Claws: support multiple bots
-- [ ] Claws: support loop command
-- [ ] Better track of progress?
-- [ ] TTS and STT for specs
-- [ ] Paste images
-- [ ] Skills?
-- [ ] MCP? Other features?
-- [ ] Z behaviour to navigate conversations
-- [ ] Sandboxing with <https://github.com/boxlite-ai/boxlite>
+- [x] Claws: support multiple bots

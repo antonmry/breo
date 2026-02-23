@@ -2,18 +2,43 @@
 -- claws.allium
 
 -- Scope: Discord bridge for breo — chat with breo via DMs or channel mentions
--- Includes: Discord message handling, response delivery, configuration commands
+-- Includes: Discord message handling, response delivery, configuration commands,
+--           multi-bot support
 -- Excludes:
 --   - Conversation lifecycle and message exchange logic (see conversation.allium)
 --   - Sandbox execution (see sandbox.allium)
 --   - Shell integration (see shell-config.allium)
 -- Dependencies: Conversation, Backend, Model, Directory from conversation.allium
---              DirectoryState from shell-config.allium
+--              DirectoryState, GlobalConfig from shell-config.allium
 
+
+-- ==========================================================================
+-- Bot configuration
+-- ==========================================================================
+
+-- A named bot profile defined in the config file.
+-- Multiple bots can be configured, each with its own token, guild, and access list.
+-- Example config:
+--   [discord.bots.mybot]
+--   bot_token = "..."
+--   guild_id = "..."
+--   allowed_users = ["..."]
+value BotProfile {
+    name: String
+    bot_token: String
+    guild_id: String?
+    allowed_users: List<String>
+}
+
+
+-- ==========================================================================
+-- Bot entity
+-- ==========================================================================
 
 -- The running Discord bot instance, bound to a directory's settings at startup.
--- Discord credentials are read from the breo global config file (~/.config/breo/config.toml).
+-- Created from a named BotProfile in the config file.
 entity Bot {
+    profile: BotProfile
     directory: Directory
     conversation: Conversation
     backend: Backend
@@ -27,17 +52,40 @@ entity Bot {
 -- Bot lifecycle
 -- ==========================================================================
 
--- Starting the bot. Inherits the directory's active conversation, agent,
--- model, and sandbox — same resolution as `breo <message>`.
+-- List configured bots: `breo claws list`.
+-- Shows all bot profiles defined in the config file.
+rule ListBots {
+    when: ListBots()
+
+    let config = GlobalConfig
+
+    requires: config.discord_bots.count > 0
+
+    ensures:
+        for profile in config.discord_bots:
+            BotListed(
+                name: profile.name,
+                guild_id: profile.guild_id
+            )
+}
+
+-- Starting a bot by name: `breo claws <bot-name>` (required, no default).
+-- The bot name argument supports shell auto-completion from configured profiles.
+-- Looks up the named profile from config, inherits the directory's active
+-- conversation, agent, model, and sandbox.
 rule StartBot {
-    when: StartBot(directory)
+    when: StartBot(directory, bot_name)
+
+    requires: bot_name != null
 
     let config = GlobalConfig
     let state = DirectoryState with directory = directory
+    let profile = config.discord_bots with name = bot_name
 
-    requires: config.discord_token != null
+    requires: profile != null
 
     ensures: Bot.created(
+        profile: profile,
         directory: directory,
         conversation: directory.active_conversation,
         backend: ResolvedBackend(state),
@@ -64,12 +112,12 @@ rule StopBot {
 
 -- A Discord message directed at the bot (DM or @mention in a channel).
 -- All messages go to the bot's current conversation regardless of source.
--- Only allowed users can interact with the bot.
+-- Only allowed users (per bot profile) can interact with the bot.
 rule HandleDiscordMessage {
     when: DiscordMessageReceived(bot, message, source)
 
     requires: bot.status = running
-    requires: message.source.user_id in config.discord_allowed_users
+    requires: message.source.user_id in bot.profile.allowed_users
 
     -- Delegate to breo's SendMessage (conversation.allium)
     ensures: SendMessage(
@@ -100,17 +148,12 @@ value MessageSource {
     user_id: String
 }
 
-
--- ==========================================================================
--- Configuration commands (nice-to-have)
--- ==========================================================================
-
 -- Reject messages from unauthorized users.
 rule RejectUnauthorizedMessage {
     when: DiscordMessageReceived(bot, message, source)
 
     requires: bot.status = running
-    requires: message.source.user_id not in config.discord_allowed_users
+    requires: message.source.user_id not in bot.profile.allowed_users
 
     ensures: DiscordMessageSent(
         target: message.source,
@@ -118,19 +161,23 @@ rule RejectUnauthorizedMessage {
     )
 }
 
--- All bot commands require the user to be in the allowed list.
--- This guard applies to every BotCommand rule below.
+
+-- ==========================================================================
+-- Configuration commands (nice-to-have)
+-- ==========================================================================
+
+-- All bot commands require the user to be in the bot's allowed list.
 
 -- Switch the active conversation from Discord.
 rule BotSwitchConversation {
     when: BotCommand(bot, "switch", conversation_name)
 
     requires: bot.status = running
-    requires: command.source.user_id in config.discord_allowed_users
+    requires: command.source.user_id in bot.profile.allowed_users
     requires: exists Conversation with directory = bot.directory and name = conversation_name
 
     ensures: bot.conversation = Conversation with name = conversation_name
-    ensures: directory.active_conversation = bot.conversation
+    ensures: bot.directory.active_conversation = bot.conversation
     ensures: StateCommitted(bot.directory)
     ensures: DiscordMessageSent(
         target: command.source,
@@ -143,7 +190,7 @@ rule BotSwitchAgent {
     when: BotCommand(bot, "agent", agent_name)
 
     requires: bot.status = running
-    requires: command.source.user_id in config.discord_allowed_users
+    requires: command.source.user_id in bot.profile.allowed_users
     requires: agent_name in { "claude", "codex", "gemini" }
 
     ensures: bot.backend = Backend with name = agent_name
@@ -158,7 +205,7 @@ rule BotSwitchModel {
     when: BotCommand(bot, "model", model_name)
 
     requires: bot.status = running
-    requires: command.source.user_id in config.discord_allowed_users
+    requires: command.source.user_id in bot.profile.allowed_users
 
     ensures: bot.model = Model with name = model_name
     ensures: DiscordMessageSent(
@@ -172,11 +219,13 @@ rule BotStatus {
     when: BotCommand(bot, "status", _)
 
     requires: bot.status = running
-    requires: command.source.user_id in config.discord_allowed_users
+    requires: command.source.user_id in bot.profile.allowed_users
 
     ensures: DiscordMessageSent(
         target: command.source,
-        content: "conversation: " + bot.conversation.name +
+        content: "bot: " + bot.profile.name +
+                 "\ndirectory: " + bot.directory.path +
+                 "\nconversation: " + bot.conversation.name +
                  "\nagent: " + bot.backend.name +
                  "\nmodel: " + (bot.model.name ?? "default") +
                  "\nsandbox: " + (bot.sandbox.name ?? "none")
@@ -188,7 +237,7 @@ rule BotListConversations {
     when: BotCommand(bot, "list", _)
 
     requires: bot.status = running
-    requires: command.source.user_id in config.discord_allowed_users
+    requires: command.source.user_id in bot.profile.allowed_users
 
     let names = bot.directory.conversations
         .sorted_by_name
@@ -210,7 +259,7 @@ rule BotNewConversation {
     when: BotCommand(bot, "new", conversation_name)
 
     requires: bot.status = running
-    requires: command.source.user_id in config.discord_allowed_users
+    requires: command.source.user_id in bot.profile.allowed_users
     requires: not exists Conversation with directory = bot.directory and name = conversation_name
 
     ensures: Conversation.created(
@@ -233,7 +282,7 @@ rule BotCompact {
     when: BotCommand(bot, "compact", _)
 
     requires: bot.status = running
-    requires: command.source.user_id in config.discord_allowed_users
+    requires: command.source.user_id in bot.profile.allowed_users
     requires: bot.conversation.exchange_count > 0
 
     ensures: CompactConversation(bot.directory, bot.conversation.name)
@@ -257,8 +306,12 @@ deferred BotDisconnected             -- close Discord websocket connection
 -- Resolved decisions
 -- ==========================================================================
 
--- All messages (DM and channel mention) go to the same conversation.
---   The bot is bound to one directory and one conversation at startup.
+-- Multiple bots supported. Each is a named profile in config under [discord.bots.<name>].
+--   Launch with `breo claws <bot-name>` (bot name is required, no default).
+--   `breo claws list` shows all configured bots.
+--   Bot name argument supports shell auto-completion from configured profiles.
+--   Each profile has its own token, guild, and access list.
+-- All messages (DM and channel mention) go to the bot's current conversation.
 -- Long responses are split into multiple Discord messages (2000 char limit).
 -- Configuration commands are nice-to-have, not core functionality.
 -- Bot commands use text prefixes (!switch, !agent, !status, etc.), not Discord
@@ -266,3 +319,4 @@ deferred BotDisconnected             -- close Discord websocket connection
 -- No file attachment support. Messages only.
 -- Configuration changes from Discord persist to directory state, so the next
 --   `breo` CLI command in the same directory picks up the changes.
+-- Access control is per bot profile (each bot has its own allowed_users list).

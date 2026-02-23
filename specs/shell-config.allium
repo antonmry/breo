@@ -20,18 +20,14 @@ entity GlobalConfig {
     sandbox_name: String
     auto_push: Boolean
     default_agent: claude | codex | gemini
-    discord_token: String?
-    discord_guild_id: String?
-    discord_allowed_users: List<String>
+    discord_bots: Map<String, BotProfile>
 
     -- defaults
     default sandbox_enabled = true
     default sandbox_name = "default"
     default auto_push = true
     default default_agent = claude
-    default discord_token = null
-    default discord_guild_id = null
-    default discord_allowed_users = []
+    default discord_bots = {}
 }
 
 -- Per-directory state: overrides that apply to a specific working directory.
@@ -222,9 +218,19 @@ deferred directory_conversations_path  -- ~/.config/breo/conversations/<dir-id>
 -- No per-directory config files. Global config (~/.config/breo/config.toml) only.
 
 -- ==========================================================================
--- Feature gap
+-- Conversation management
 -- ==========================================================================
 
--- Conversation renaming is not yet supported but is needed.
--- Users should be able to rename a conversation without losing history or
--- breaking the active conversation reference.
+-- Rename a conversation without losing history.
+-- If the renamed conversation is the active one, the active reference is updated.
+rule RenameConversation {
+    when: RenameConversation(directory, old_name, new_name)
+
+    requires: exists Conversation with directory = directory and name = old_name
+    requires: not exists Conversation with directory = directory and name = new_name
+
+    ensures: Conversation with name = old_name is renamed to new_name
+    ensures: if directory.active_conversation = old_name:
+        directory.active_conversation = new_name
+    ensures: StateCommitted(directory)
+}

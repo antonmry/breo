@@ -38,6 +38,24 @@ struct DiscordSection {
     bot_token: Option<String>,
     guild_id: Option<String>,
     allowed_users: Vec<String>,
+    bots: HashMap<String, DiscordBotSection>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+struct DiscordBotSection {
+    #[serde(alias = "token")]
+    bot_token: Option<String>,
+    guild_id: Option<String>,
+    allowed_users: Vec<String>,
+}
+
+#[derive(Clone)]
+struct DiscordBotProfile {
+    name: String,
+    bot_token: String,
+    guild_id: Option<String>,
+    allowed_users: Vec<String>,
 }
 
 impl Default for Config {
@@ -81,6 +99,50 @@ impl Config {
         } else {
             from_section
         }
+    }
+
+    fn resolved_discord_profiles(&self) -> Vec<DiscordBotProfile> {
+        let mut profiles = Vec::new();
+
+        if let Some(discord) = &self.discord
+            && !discord.bots.is_empty()
+        {
+            let mut named: Vec<(String, DiscordBotSection)> = discord
+                .bots
+                .iter()
+                .map(|(name, section)| (name.clone(), section.clone()))
+                .collect();
+            named.sort_by(|a, b| a.0.cmp(&b.0));
+
+            for (name, section) in named {
+                if let Some(token) = section.bot_token {
+                    profiles.push(DiscordBotProfile {
+                        name,
+                        bot_token: token,
+                        guild_id: section.guild_id,
+                        allowed_users: section.allowed_users,
+                    });
+                }
+            }
+            return profiles;
+        }
+
+        if let Some(token) = self.resolved_discord_token() {
+            profiles.push(DiscordBotProfile {
+                name: "default".to_string(),
+                bot_token: token,
+                guild_id: self.resolved_discord_guild_id(),
+                allowed_users: self.resolved_discord_allowed_users(),
+            });
+        }
+
+        profiles
+    }
+
+    fn find_discord_profile(&self, name: &str) -> Option<DiscordBotProfile> {
+        self.resolved_discord_profiles()
+            .into_iter()
+            .find(|profile| profile.name == name)
     }
 }
 
@@ -155,6 +217,21 @@ fn list_models() -> Vec<CompletionCandidate> {
         CompletionCandidate::new("gemini-2.5-pro").help(Some("Gemini 2.5 Pro (1M)".into())),
         CompletionCandidate::new("gemini-2.5-flash").help(Some("Gemini 2.5 Flash (1M)".into())),
     ]
+}
+
+fn list_discord_bots() -> Vec<CompletionCandidate> {
+    load_config()
+        .resolved_discord_profiles()
+        .into_iter()
+        .map(|profile| {
+            let help = profile
+                .guild_id
+                .as_deref()
+                .map(|id| format!("Guild {id}"))
+                .unwrap_or_else(|| "Guild (not set)".to_string());
+            CompletionCandidate::new(profile.name).help(Some(help.into()))
+        })
+        .collect()
 }
 
 fn list_conversations() -> Vec<CompletionCandidate> {
@@ -246,6 +323,14 @@ enum Commands {
     },
     /// Show active conversation, agent, and sandbox for the current directory
     Status,
+    /// Rename a conversation
+    Rename {
+        /// Current conversation name (defaults to active)
+        #[arg(add = ArgValueCandidates::new(list_conversations))]
+        old_name: String,
+        /// New name for the conversation
+        new_name: String,
+    },
     /// Compact a conversation by summarizing it to save context
     Compact {
         /// Conversation to compact (defaults to active)
@@ -289,7 +374,11 @@ enum Commands {
         no_sandbox: bool,
     },
     /// Start the Discord bot bridge for the current directory
-    Claws,
+    Claws {
+        /// Bot profile name, or 'list' to show configured bot profiles
+        #[arg(add = ArgValueCandidates::new(list_discord_bots))]
+        bot: String,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -559,6 +648,43 @@ fn cmd_new(name: &str, push: bool) {
         std::process::exit(1);
     }
     println!("Created and switched to conversation: {name}");
+}
+
+fn cmd_rename(old_name: &str, new_name: &str, push: bool) {
+    let old_path = conversation_path(old_name);
+    if !old_path.exists() {
+        eprintln!("Conversation '{old_name}' does not exist");
+        std::process::exit(1);
+    }
+    let new_path = conversation_path(new_name);
+    if new_path.exists() {
+        eprintln!("Conversation '{new_name}' already exists");
+        std::process::exit(1);
+    }
+
+    if let Err(e) = fs::rename(&old_path, &new_path) {
+        eprintln!(
+            "Failed to rename {} -> {}: {e}",
+            old_path.display(),
+            new_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    // Update the active conversation reference if it pointed to the old name
+    let active = get_active();
+    if active == old_name {
+        set_active(new_name);
+    }
+
+    git_commit_conversation(
+        &new_path,
+        &format!("breo: rename '{old_name}' -> '{new_name}'"),
+        push,
+    );
+    git_commit_state(push);
+
+    println!("Renamed conversation: {old_name} -> {new_name}");
 }
 
 fn cmd_pick() {
@@ -1387,6 +1513,7 @@ fn parse_bot_command(input: &str) -> Option<(String, String)> {
 
 #[derive(Clone)]
 struct DiscordBotState {
+    bot_name: String,
     conversation: String,
     backend: Backend,
     model: Option<String>,
@@ -1493,7 +1620,8 @@ impl ClawsHandler {
                 let state = self.state.lock().await;
                 let dir = current_dir_key();
                 let status = format!(
-                    "directory: {}\nconversation: {}\nagent: {}\nmodel: {}\nsandbox: {}",
+                    "bot: {}\ndirectory: {}\nconversation: {}\nagent: {}\nmodel: {}\nsandbox: {}",
+                    state.bot_name,
                     dir,
                     state.conversation,
                     backend_name(&state.backend),
@@ -1692,8 +1820,11 @@ impl EventHandler for ClawsHandler {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_claws(
+    bot_name: &str,
     token: &str,
+    guild_id: Option<String>,
     allowed_users: Vec<String>,
     backend: Backend,
     model: Option<String>,
@@ -1707,12 +1838,16 @@ fn cmd_claws(
         | GatewayIntents::MESSAGE_CONTENT;
 
     eprintln!(
-        "[claws] Conversation: {} | Agent: {} | Model: {} | Sandbox: {}",
+        "[claws] Bot: {} | Conversation: {} | Agent: {} | Model: {} | Sandbox: {}",
+        bot_name,
         conversation,
         backend_name(&backend),
         model.as_deref().unwrap_or("default"),
         sandbox.as_deref().unwrap_or("none")
     );
+    if let Some(id) = guild_id.as_deref() {
+        eprintln!("[claws] Guild filter configured: {id}");
+    }
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -1724,6 +1859,7 @@ fn cmd_claws(
 
     runtime.block_on(async move {
         let state = Arc::new(tokio::sync::Mutex::new(DiscordBotState {
+            bot_name: bot_name.to_string(),
             conversation,
             backend,
             model,
@@ -1759,6 +1895,24 @@ fn cmd_claws(
             std::process::exit(1);
         }
     });
+}
+
+fn cmd_claws_list(config: &Config) {
+    let profiles = config.resolved_discord_profiles();
+    if profiles.is_empty() {
+        eprintln!("No Discord bot profiles configured.");
+        eprintln!("Add entries under [discord.bots.<name>] in config.toml.");
+        std::process::exit(1);
+    }
+
+    for profile in profiles {
+        println!(
+            "{}\tguild={}\tallowed_users={}",
+            profile.name,
+            profile.guild_id.as_deref().unwrap_or("(none)"),
+            profile.allowed_users.len()
+        );
+    }
 }
 
 fn main() {
@@ -1814,36 +1968,39 @@ fn main() {
 
     match (cli.message, cli.command) {
         (_, Some(Commands::New { name })) => cmd_new(&name, push),
+        (_, Some(Commands::Rename { old_name, new_name })) => {
+            cmd_rename(&old_name, &new_name, push)
+        }
         (_, Some(Commands::List)) => cmd_list(),
         (_, Some(Commands::Pick)) => cmd_pick(),
         (_, Some(Commands::Status)) => cmd_status(),
         (_, Some(Commands::Setup { shell })) => cmd_setup(&shell),
         (_, Some(Commands::Compact { name })) => cmd_compact(name.as_deref(), sandbox, push),
-        (_, Some(Commands::Claws)) => {
-            let token = config.resolved_discord_token().unwrap_or_else(|| {
-                eprintln!(
-                    "Discord bot token is missing.\n\
-                     Set either `discord_token = \"...\"` in config.toml\n\
-                     or `[discord] bot_token = \"...\"`."
-                );
+        (_, Some(Commands::Claws { bot })) => {
+            if bot == "list" {
+                cmd_claws_list(&config);
+                return;
+            }
+
+            let profile = config.find_discord_profile(&bot).unwrap_or_else(|| {
+                eprintln!("Discord bot profile '{bot}' was not found.");
+                eprintln!("Use `breo claws list` to view configured bot profiles.");
                 std::process::exit(1);
             });
-            let allowed_users = config.resolved_discord_allowed_users();
-            if allowed_users.is_empty() {
+
+            if profile.allowed_users.is_empty() {
                 eprintln!(
-                    "No allowed Discord users configured.\n\
-                     Set either `discord_allowed_users = [\"...\"]` in config.toml\n\
-                     or `[discord] allowed_users = [\"...\"]`."
+                    "Profile '{bot}' has no allowed users.\n\
+                     Add `allowed_users = [\"...\"]` under [discord.bots.{bot}] in config.toml."
                 );
                 std::process::exit(1);
             }
-            let guild_id = config.resolved_discord_guild_id();
-            if let Some(ref id) = guild_id {
-                eprintln!("[claws] Guild filter configured: {id}");
-            }
+
             cmd_claws(
-                &token,
-                allowed_users,
+                &profile.name,
+                &profile.bot_token,
+                profile.guild_id,
+                profile.allowed_users,
                 backend.clone(),
                 resolved_model.clone(),
                 sandbox_name.clone(),
