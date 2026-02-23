@@ -4,6 +4,11 @@ use clap_complete::engine::{
 };
 use clap_complete::env::CompleteEnv;
 use serde::{Deserialize, Serialize};
+use serenity::all::GatewayIntents;
+use serenity::async_trait;
+use serenity::model::channel::Message as DiscordMessage;
+use serenity::model::gateway::Ready;
+use serenity::prelude::*;
 use skim::prelude::*;
 use std::collections::HashMap;
 use std::fs;
@@ -11,6 +16,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, Cursor, IsTerminal, Read as _};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 #[serde(default)]
@@ -19,6 +25,19 @@ struct Config {
     sandbox_name: String,
     push: bool,
     agent: String,
+    discord_token: Option<String>,
+    discord_guild_id: Option<String>,
+    discord_allowed_users: Vec<String>,
+    discord: Option<DiscordSection>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct DiscordSection {
+    #[serde(alias = "token")]
+    bot_token: Option<String>,
+    guild_id: Option<String>,
+    allowed_users: Vec<String>,
 }
 
 impl Default for Config {
@@ -28,6 +47,39 @@ impl Default for Config {
             sandbox_name: "default".into(),
             push: true,
             agent: "claude".into(),
+            discord_token: None,
+            discord_guild_id: None,
+            discord_allowed_users: Vec::new(),
+            discord: None,
+        }
+    }
+}
+
+impl Config {
+    fn resolved_discord_token(&self) -> Option<String> {
+        self.discord
+            .as_ref()
+            .and_then(|d| d.bot_token.clone())
+            .or_else(|| self.discord_token.clone())
+    }
+
+    fn resolved_discord_guild_id(&self) -> Option<String> {
+        self.discord
+            .as_ref()
+            .and_then(|d| d.guild_id.clone())
+            .or_else(|| self.discord_guild_id.clone())
+    }
+
+    fn resolved_discord_allowed_users(&self) -> Vec<String> {
+        let from_section = self
+            .discord
+            .as_ref()
+            .map(|d| d.allowed_users.clone())
+            .unwrap_or_default();
+        if from_section.is_empty() {
+            self.discord_allowed_users.clone()
+        } else {
+            from_section
         }
     }
 }
@@ -106,17 +158,26 @@ fn list_models() -> Vec<CompletionCandidate> {
 }
 
 fn list_conversations() -> Vec<CompletionCandidate> {
+    conversation_names_sorted()
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
+}
+
+fn conversation_names_sorted() -> Vec<String> {
     let dir = dir_conversations_dir();
     let Ok(entries) = fs::read_dir(&dir) else {
         return vec![];
     };
-    entries
+    let mut names: Vec<String> = entries
         .filter_map(|e| {
             let name = e.ok()?.file_name().to_string_lossy().to_string();
             let name = name.strip_suffix(".md")?;
-            Some(CompletionCandidate::new(name.to_string()))
+            Some(name.to_string())
         })
-        .collect()
+        .collect();
+    names.sort();
+    names
 }
 
 #[derive(Clone, ValueEnum)]
@@ -227,6 +288,8 @@ enum Commands {
         #[arg(long)]
         no_sandbox: bool,
     },
+    /// Start the Discord bot bridge for the current directory
+    Claws,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -474,20 +537,27 @@ fn print_context_summary(
     );
 }
 
-fn cmd_new(name: &str, push: bool) {
+fn create_conversation(name: &str, push: bool) -> Result<(), String> {
     ensure_breo_dir();
     let path = conversation_path(name);
     if path.exists() {
-        eprintln!("Conversation '{name}' already exists");
-        std::process::exit(1);
+        return Err(format!("Conversation '{name}' already exists"));
     }
     let header = format!("# Conversation: {name}\n\n");
     if let Err(e) = fs::write(&path, &header) {
-        eprintln!("Failed to create {}: {e}", path.display());
-        std::process::exit(1);
+        return Err(format!("Failed to create {}: {e}", path.display()));
     }
     set_active(name);
+    git_commit_conversation(&path, &format!("breo: new conversation '{name}'"), push);
     git_commit_state(push);
+    Ok(())
+}
+
+fn cmd_new(name: &str, push: bool) {
+    if let Err(e) = create_conversation(name, push) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     println!("Created and switched to conversation: {name}");
 }
 
@@ -556,18 +626,7 @@ fn cmd_list() {
         return;
     }
     let active = get_active();
-    let mut entries: Vec<String> = fs::read_dir(&dir)
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to read {}: {e}", dir.display());
-            std::process::exit(1);
-        })
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            name.strip_suffix(".md").map(String::from)
-        })
-        .collect();
-    entries.sort();
+    let entries = conversation_names_sorted();
 
     if entries.is_empty() {
         println!("No conversations yet.");
@@ -832,6 +891,15 @@ fn backend_name(backend: &Backend) -> &'static str {
     }
 }
 
+fn backend_from_name(name: &str) -> Option<Backend> {
+    match name.trim().to_lowercase().as_str() {
+        "claude" => Some(Backend::Claude),
+        "codex" => Some(Backend::Codex),
+        "gemini" => Some(Backend::Gemini),
+        _ => None,
+    }
+}
+
 fn read_attached_files(files: &[PathBuf]) -> String {
     let mut attachments = String::new();
     for path in files {
@@ -912,6 +980,22 @@ fn git_commit_state(push: bool) {
                 .spawn();
         }
     }
+}
+
+fn persist_dir_state(
+    conversation: &str,
+    backend: &Backend,
+    model: Option<&str>,
+    sandbox: Option<&str>,
+    push: bool,
+) {
+    let mut state = load_dir_state();
+    state.conversation = Some(conversation.to_string());
+    state.agent = Some(backend_name(backend).to_string());
+    state.model = model.map(ToString::to_string);
+    state.sandbox = sandbox.map(ToString::to_string);
+    save_dir_state(&state);
+    git_commit_state(push);
 }
 
 fn cmd_compact(name: Option<&str>, sandbox: Option<&str>, push: bool) {
@@ -1264,6 +1348,419 @@ fn cmd_loop(
     }
 }
 
+fn split_for_discord(text: &str, max_chars: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec!["(no response)".to_string()];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .chunks(max_chars)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect()
+}
+
+fn strip_leading_mentions(input: &str) -> String {
+    let mut rest = input.trim();
+    loop {
+        if let Some(after) = rest.strip_prefix("<@")
+            && let Some(end) = after.find('>')
+        {
+            rest = after[end + 1..].trim_start();
+            continue;
+        }
+        break;
+    }
+    rest.to_string()
+}
+
+fn parse_bot_command(input: &str) -> Option<(String, String)> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('!') {
+        return None;
+    }
+    let raw = &trimmed[1..];
+    let mut parts = raw.splitn(2, char::is_whitespace);
+    let cmd = parts.next()?.trim().to_lowercase();
+    let arg = parts.next().unwrap_or("").trim().to_string();
+    Some((cmd, arg))
+}
+
+#[derive(Clone)]
+struct DiscordBotState {
+    conversation: String,
+    backend: Backend,
+    model: Option<String>,
+    sandbox: Option<String>,
+    push: bool,
+    allowed_users: Vec<String>,
+}
+
+struct ClawsHandler {
+    state: Arc<tokio::sync::Mutex<DiscordBotState>>,
+}
+
+impl ClawsHandler {
+    async fn send_text(
+        &self,
+        ctx: &Context,
+        msg: &DiscordMessage,
+        text: &str,
+    ) -> serenity::Result<()> {
+        for chunk in split_for_discord(text, 2000) {
+            msg.channel_id.say(&ctx.http, chunk).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_command(
+        &self,
+        ctx: &Context,
+        msg: &DiscordMessage,
+        command: &str,
+        arg: &str,
+    ) -> serenity::Result<()> {
+        match command {
+            "switch" => {
+                if arg.is_empty() {
+                    return self
+                        .send_text(ctx, msg, "Usage: !switch <conversation>")
+                        .await;
+                }
+                if !conversation_path(arg).exists() {
+                    return self.send_text(ctx, msg, "Conversation not found.").await;
+                }
+                let mut state = self.state.lock().await;
+                state.conversation = arg.to_string();
+                set_active(&state.conversation);
+                persist_dir_state(
+                    &state.conversation,
+                    &state.backend,
+                    state.model.as_deref(),
+                    state.sandbox.as_deref(),
+                    state.push,
+                );
+                self.send_text(
+                    ctx,
+                    msg,
+                    &format!("Switched to conversation: {}", state.conversation),
+                )
+                .await
+            }
+            "agent" => {
+                if arg.is_empty() {
+                    return self
+                        .send_text(ctx, msg, "Usage: !agent <claude|codex|gemini>")
+                        .await;
+                }
+                let Some(backend) = backend_from_name(arg) else {
+                    return self
+                        .send_text(ctx, msg, "Unknown agent. Use: claude, codex, or gemini.")
+                        .await;
+                };
+                let mut state = self.state.lock().await;
+                state.backend = backend;
+                persist_dir_state(
+                    &state.conversation,
+                    &state.backend,
+                    state.model.as_deref(),
+                    state.sandbox.as_deref(),
+                    state.push,
+                );
+                self.send_text(
+                    ctx,
+                    msg,
+                    &format!("Switched to agent: {}", backend_name(&state.backend)),
+                )
+                .await
+            }
+            "model" => {
+                if arg.is_empty() {
+                    return self.send_text(ctx, msg, "Usage: !model <name>").await;
+                }
+                let mut state = self.state.lock().await;
+                state.model = Some(arg.to_string());
+                persist_dir_state(
+                    &state.conversation,
+                    &state.backend,
+                    state.model.as_deref(),
+                    state.sandbox.as_deref(),
+                    state.push,
+                );
+                self.send_text(ctx, msg, &format!("Switched to model: {}", arg))
+                    .await
+            }
+            "status" => {
+                let state = self.state.lock().await;
+                let dir = current_dir_key();
+                let status = format!(
+                    "directory: {}\nconversation: {}\nagent: {}\nmodel: {}\nsandbox: {}",
+                    dir,
+                    state.conversation,
+                    backend_name(&state.backend),
+                    state.model.as_deref().unwrap_or("default"),
+                    state.sandbox.as_deref().unwrap_or("none")
+                );
+                self.send_text(ctx, msg, &status).await
+            }
+            "list" => {
+                let state = self.state.lock().await;
+                let names = conversation_names_sorted();
+                if names.is_empty() {
+                    return self.send_text(ctx, msg, "No conversations yet.").await;
+                }
+                let body = names
+                    .into_iter()
+                    .map(|name| {
+                        if name == state.conversation {
+                            format!("* {name}")
+                        } else {
+                            format!("  {name}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.send_text(ctx, msg, &body).await
+            }
+            "new" => {
+                if arg.is_empty() {
+                    return self.send_text(ctx, msg, "Usage: !new <conversation>").await;
+                }
+                let state_snapshot = self.state.lock().await.clone();
+                let conversation_name = arg.to_string();
+                let result = tokio::task::spawn_blocking(move || {
+                    create_conversation(&conversation_name, state_snapshot.push)
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return self.send_text(ctx, msg, &e).await,
+                    Err(e) => {
+                        return self
+                            .send_text(ctx, msg, &format!("Conversation creation failed: {e}"))
+                            .await;
+                    }
+                }
+
+                let mut state = self.state.lock().await;
+                state.conversation = arg.to_string();
+                persist_dir_state(
+                    &state.conversation,
+                    &state.backend,
+                    state.model.as_deref(),
+                    state.sandbox.as_deref(),
+                    state.push,
+                );
+                self.send_text(
+                    ctx,
+                    msg,
+                    &format!(
+                        "Created and switched to conversation: {}",
+                        state.conversation
+                    ),
+                )
+                .await
+            }
+            "compact" => {
+                let state = self.state.lock().await.clone();
+                let conversation = state.conversation.clone();
+                let path = conversation_path(&conversation);
+                if !path.exists() {
+                    return self
+                        .send_text(ctx, msg, "Conversation does not exist.")
+                        .await;
+                }
+                let content = fs::read_to_string(&path).unwrap_or_default();
+                if count_exchanges(&content) == 0 {
+                    return self
+                        .send_text(ctx, msg, &format!("Nothing to compact in '{conversation}'"))
+                        .await;
+                }
+                let conversation_for_msg = conversation.clone();
+                let sandbox = state.sandbox.clone();
+                let push = state.push;
+                let compact_result = tokio::task::spawn_blocking(move || {
+                    cmd_compact(Some(&conversation), sandbox.as_deref(), push);
+                })
+                .await;
+                if let Err(e) = compact_result {
+                    return self
+                        .send_text(ctx, msg, &format!("Compaction failed: {e}"))
+                        .await;
+                }
+                self.send_text(
+                    ctx,
+                    msg,
+                    &format!("Compacted conversation: {conversation_for_msg}"),
+                )
+                .await
+            }
+            _ => {
+                self.send_text(
+                    ctx,
+                    msg,
+                    "Unknown command. Use: !switch, !agent, !model, !status, !list, !new, !compact",
+                )
+                .await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl EventHandler for ClawsHandler {
+    async fn ready(&self, _ctx: Context, ready: Ready) {
+        eprintln!("[claws] Connected as {}", ready.user.name);
+    }
+
+    async fn message(&self, ctx: Context, msg: DiscordMessage) {
+        if msg.author.bot {
+            return;
+        }
+
+        let is_dm = msg.guild_id.is_none();
+        let is_mention = msg.mentions_me(&ctx).await.unwrap_or(false);
+        if !is_dm && !is_mention {
+            return;
+        }
+
+        let user_id = msg.author.id.get().to_string();
+        let allowed_users = {
+            let state = self.state.lock().await;
+            state.allowed_users.clone()
+        };
+        if !allowed_users.contains(&user_id) {
+            let _ = self.send_text(&ctx, &msg, "Access denied.").await;
+            return;
+        }
+
+        let content = strip_leading_mentions(&msg.content);
+        if content.is_empty() {
+            return;
+        }
+
+        if let Some((command, arg)) = parse_bot_command(&content) {
+            let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
+            let _ = self.handle_command(&ctx, &msg, &command, &arg).await;
+            return;
+        }
+
+        let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
+
+        let state = self.state.lock().await.clone();
+        let conversation = state.conversation.clone();
+        let backend = state.backend.clone();
+        let model = state.model.clone();
+        let sandbox = state.sandbox.clone();
+        let push = state.push;
+        let message = content.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let (_, response_or_err, success) = cmd_send_inner(
+                &message,
+                Some(&conversation),
+                model.as_deref(),
+                &backend,
+                &[],
+                sandbox.as_deref(),
+                push,
+                false,
+            );
+            if success {
+                Ok(response_or_err)
+            } else {
+                Err(response_or_err)
+            }
+        })
+        .await;
+
+        match result {
+            Ok(Ok(response)) => {
+                let _ = self.send_text(&ctx, &msg, &response).await;
+            }
+            Ok(Err(err)) => {
+                let _ = self
+                    .send_text(&ctx, &msg, &format!("Command failed: {err}"))
+                    .await;
+            }
+            Err(err) => {
+                let _ = self
+                    .send_text(&ctx, &msg, &format!("Worker failed: {err}"))
+                    .await;
+            }
+        }
+    }
+}
+
+fn cmd_claws(
+    token: &str,
+    allowed_users: Vec<String>,
+    backend: Backend,
+    model: Option<String>,
+    sandbox: Option<String>,
+    push: bool,
+) {
+    ensure_breo_dir();
+    let conversation = get_active();
+    let intents = GatewayIntents::DIRECT_MESSAGES
+        | GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT;
+
+    eprintln!(
+        "[claws] Conversation: {} | Agent: {} | Model: {} | Sandbox: {}",
+        conversation,
+        backend_name(&backend),
+        model.as_deref().unwrap_or("default"),
+        sandbox.as_deref().unwrap_or("none")
+    );
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Failed to create async runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    runtime.block_on(async move {
+        let state = Arc::new(tokio::sync::Mutex::new(DiscordBotState {
+            conversation,
+            backend,
+            model,
+            sandbox,
+            push,
+            allowed_users,
+        }));
+
+        let handler = ClawsHandler {
+            state: state.clone(),
+        };
+
+        let mut client = match serenity::Client::builder(token, intents)
+            .event_handler(handler)
+            .await
+        {
+            Ok(client) => client,
+            Err(e) => {
+                eprintln!("Failed to create Discord client: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        let shard_manager = client.shard_manager.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("[claws] Shutdown requested");
+            shard_manager.shutdown_all().await;
+        });
+
+        if let Err(e) = client.start().await {
+            eprintln!("Discord client exited with error: {e}");
+            std::process::exit(1);
+        }
+    });
+}
+
 fn main() {
     CompleteEnv::with_factory(Cli::command).complete();
 
@@ -1306,13 +1803,13 @@ fn main() {
     let resolved_model: Option<String> = cli.model.clone().or_else(|| dir_state.model.clone());
 
     let save_after_send = |conversation: &str| {
-        let mut state = load_dir_state();
-        state.conversation = Some(conversation.to_string());
-        state.agent = Some(backend_name(&backend).to_string());
-        state.model = resolved_model.clone();
-        state.sandbox = sandbox.map(String::from);
-        save_dir_state(&state);
-        git_commit_state(push);
+        persist_dir_state(
+            conversation,
+            &backend,
+            resolved_model.as_deref(),
+            sandbox,
+            push,
+        );
     };
 
     match (cli.message, cli.command) {
@@ -1322,6 +1819,37 @@ fn main() {
         (_, Some(Commands::Status)) => cmd_status(),
         (_, Some(Commands::Setup { shell })) => cmd_setup(&shell),
         (_, Some(Commands::Compact { name })) => cmd_compact(name.as_deref(), sandbox, push),
+        (_, Some(Commands::Claws)) => {
+            let token = config.resolved_discord_token().unwrap_or_else(|| {
+                eprintln!(
+                    "Discord bot token is missing.\n\
+                     Set either `discord_token = \"...\"` in config.toml\n\
+                     or `[discord] bot_token = \"...\"`."
+                );
+                std::process::exit(1);
+            });
+            let allowed_users = config.resolved_discord_allowed_users();
+            if allowed_users.is_empty() {
+                eprintln!(
+                    "No allowed Discord users configured.\n\
+                     Set either `discord_allowed_users = [\"...\"]` in config.toml\n\
+                     or `[discord] allowed_users = [\"...\"]`."
+                );
+                std::process::exit(1);
+            }
+            let guild_id = config.resolved_discord_guild_id();
+            if let Some(ref id) = guild_id {
+                eprintln!("[claws] Guild filter configured: {id}");
+            }
+            cmd_claws(
+                &token,
+                allowed_users,
+                backend.clone(),
+                resolved_model.clone(),
+                sandbox_name.clone(),
+                push,
+            );
+        }
         (
             _,
             Some(Commands::Loop {

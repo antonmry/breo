@@ -68,6 +68,7 @@ breo -f src/main.rs "Review this code"
 | `breo compact [name]`             | Summarize a conversation to save context          |
 | `breo setup <shell>`              | Print shell setup for TAB completion              |
 | `breo loop <plan> <verification>` | Run an implement/validate loop                    |
+| `breo claws`                      | Start a Discord DM/@mention bridge                |
 
 ## Options
 
@@ -245,6 +246,12 @@ sandbox_name = "default"
 
 # Auto-push after commits
 push = true
+
+# Discord bridge (for `breo claws`)
+[discord]
+bot_token = "YOUR_DISCORD_BOT_TOKEN"
+guild_id = "OPTIONAL_GUILD_ID"
+allowed_users = ["YOUR_DISCORD_USER_ID"]
 ```
 
 All config values can be overridden per-command with CLI flags. Per-directory

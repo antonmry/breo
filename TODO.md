@@ -7,9 +7,15 @@
 - [x] git integration
 - [x] Install via curl and cargo binary
 - [x] Able to select the model
-- [ ] Specs with Allium?
-- [ ] TTS and STT for specs?
+- [x] Claws
+- [ ] Specs: with Allium?
+- [ ] Specs: one crate per spec
+- [ ] Claws: support multiple bots
+- [ ] Claws: support loop command
 - [ ] Better track of progress?
-- [ ] MCP? Skills? Ralph? Other features?
+- [ ] TTS and STT for specs
+- [ ] Paste images
+- [ ] Skills?
+- [ ] MCP? Other features?
 - [ ] Z behaviour to navigate conversations
 - [ ] Sandboxing with <https://github.com/boxlite-ai/boxlite>

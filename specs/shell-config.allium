@@ -20,12 +20,18 @@ entity GlobalConfig {
     sandbox_name: String
     auto_push: Boolean
     default_agent: claude | codex | gemini
+    discord_token: String?
+    discord_guild_id: String?
+    discord_allowed_users: List<String>
 
     -- defaults
     default sandbox_enabled = true
     default sandbox_name = "default"
     default auto_push = true
     default default_agent = claude
+    default discord_token = null
+    default discord_guild_id = null
+    default discord_allowed_users = []
 }
 
 -- Per-directory state: overrides that apply to a specific working directory.
