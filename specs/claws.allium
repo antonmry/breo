@@ -1,9 +1,11 @@
 -- allium: 1
 -- claws.allium
 
--- Scope: Discord bridge for breo — chat with breo via DMs or channel mentions
+-- Scope: Discord bridge for breo — chat with breo via DMs or channel mentions,
+--        plus scheduled message execution via cron
 -- Includes: Discord message handling, response delivery, configuration commands,
---           multi-bot support
+--           multi-bot support, cron scheduling, one-shot and periodic execution,
+--           overlap protection
 -- Excludes:
 --   - Conversation lifecycle and message exchange logic (see conversation.allium)
 --   - Sandbox execution (see sandbox.allium)
@@ -45,6 +47,7 @@ entity Bot {
     model: Model?
     sandbox: Sandbox?
     status: running | stopped
+    last_user_id: String?                                -- tracks last authorized Discord message sender
 }
 
 
@@ -91,9 +94,11 @@ rule StartBot {
         backend: ResolvedBackend(state),
         model: ResolvedModel(state),
         sandbox: ResolvedSandbox(state),
-        status: running
+        status: running,
+        last_user_id: null
     )
     ensures: BotConnected(bot)
+    ensures: CronLoopStarted(bot)
 }
 
 rule StopBot {
@@ -118,6 +123,9 @@ rule HandleDiscordMessage {
 
     requires: bot.status = running
     requires: message.source.user_id in bot.profile.allowed_users
+
+    -- Track the sender for cron DM delivery (skip bot's own ID)
+    ensures: bot.last_user_id = message.source.user_id
 
     -- Delegate to breo's SendMessage (conversation.allium)
     ensures: SendMessage(
@@ -163,10 +171,11 @@ rule RejectUnauthorizedMessage {
 
 
 -- ==========================================================================
--- Configuration commands (nice-to-have)
+-- Configuration commands
 -- ==========================================================================
 
 -- All bot commands require the user to be in the bot's allowed list.
+-- Commands use text prefixes (!switch, !agent, etc.), not Discord slash commands.
 
 -- Switch the active conversation from Discord.
 rule BotSwitchConversation {
@@ -294,12 +303,188 @@ rule BotCompact {
 
 
 -- ==========================================================================
+-- Cron configuration
+-- ==========================================================================
+
+-- A scheduled task defined in .breo/cron.toml.
+-- One-shot tasks have a fixed datetime. Periodic tasks have an interval.
+--
+-- The cron file should include a comment header explaining the format so that
+-- LLM agents can read it and manage tasks autonomously:
+--
+--   # breo cron — scheduled messages for the claws Discord bot
+--   #
+--   # The claws bot polls this file every 10 seconds. When a task's next_run
+--   # time has passed, the bot sends the message to breo (using the bot's active
+--   # conversation and agent) and sends the response via DM to the specified user.
+--   #
+--   # Fields:
+--   #   name      — unique task identifier
+--   #   message   — the message to send to breo (the LLM agent will execute this)
+--   #   next_run  — ISO 8601 datetime for the next execution (e.g. 2026-02-24T09:00:00)
+--   #   interval  — (optional) duration between runs (e.g. "24h", "1h", "30m")
+--   #               if omitted, the task runs once and is removed
+--   #   status    — task state: "pending" (waiting), "running" (in progress)
+--   #               do not manually set to "running" — the bot manages this
+--   #
+--   #
+--   # Note: user_id is auto-filled by the bot (from the last Discord message sender).
+--   # You do not need to set it.
+--   #
+--   # One-shot tasks are removed after execution.
+--   # Periodic tasks get next_run recalculated (next_run + interval) automatically.
+--   # To add a new task, append a [[task]] entry and the bot will pick it up.
+--   # To cancel a task, delete its [[task]] entry.
+--   #
+--   # When scheduling a task, write the [[task]] entry to this file and reply to
+--   # the user confirming the task has been scheduled, including the task name,
+--   # next_run time, and whether it is periodic or one-shot.
+--   #
+--   # Example:
+--   #
+--   #   [[task]]
+--   #   name = "daily-status"
+--   #   message = "Check the logs and report any errors from the last 24 hours"
+--   #   next_run = 2026-02-24T09:00:00
+--   #   interval = "24h"
+--   #   status = "pending"
+--   #
+--   #   [[task]]
+--   #   name = "one-shot-reminder"
+--   #   message = "Summarize the current state of the feature branch"
+--   #   next_run = 2026-02-24T15:30:00
+--   #   status = "pending"
+
+entity CronTask {
+    name: String
+    message: String
+    user_id: String?                                     -- auto-filled from last Discord message sender
+    next_run: Timestamp
+    interval: Duration?
+    status: pending | running
+
+    -- Derived
+    is_due: next_run <= now
+    is_periodic: interval != null
+}
+
+value CronFile {
+    path: String                                     -- .breo/cron.toml
+    tasks: List<CronTask>
+}
+
+
+-- ==========================================================================
+-- Cron polling
+-- ==========================================================================
+
+-- The bot polls the cron file every 10 seconds for due tasks.
+-- This runs as a background loop alongside the Discord message handler.
+-- Tasks with status = running are skipped (overlap protection).
+-- If .breo/cron.toml does not exist, it is created (including the .breo directory)
+-- with the comment header explaining the format.
+rule PollCronFile {
+    when: CronPollTick(bot)
+
+    requires: bot.status = running
+
+    ensures: ensure_cron_file(bot.directory)
+    let cron_file = load_cron_file(bot.directory)
+
+    ensures:
+        for task in cron_file.tasks:
+            if task.is_due and task.status = pending:
+                ExecuteCronTask(bot, task)
+}
+
+config {
+    poll_interval: Duration = 10.seconds
+}
+
+
+-- ==========================================================================
+-- Task execution
+-- ==========================================================================
+
+-- A due task fires: mark as running, send the message through breo,
+-- deliver response to Discord.
+-- Tasks already in running state are skipped by the poller, preventing
+-- duplicate execution when a task takes longer than the poll interval.
+rule ExecuteCronTask {
+    when: ExecuteCronTask(bot, task)
+
+    requires: task.status = pending
+    requires: task.is_due
+
+    -- Mark as running immediately to prevent overlap
+    ensures: task.status = running
+    ensures: save_cron_file(bot.directory)
+
+    -- Send message through breo's active conversation
+    ensures: SendMessage(
+        directory: bot.directory,
+        conversation_name: bot.conversation.name,
+        message: task.message,
+        model: bot.model,
+        backend: bot.backend,
+        attachments: []
+    )
+
+    -- Deliver response via DM. Resolve user: task.user_id > bot.last_user_id
+    let resolved_user_id = task.user_id ?? bot.last_user_id
+    requires: resolved_user_id != null                   -- skip if no sender known
+
+    let response = bot.conversation.exchanges.last.assistant_response
+    let chunks = split_message(response, 2000)
+
+    ensures:
+        for chunk in chunks:
+            DiscordDMSent(
+                user_id: resolved_user_id,
+                content: chunk
+            )
+
+    ensures: CronTaskCompleted(bot, task)
+}
+
+
+-- ==========================================================================
+-- Task completion and rescheduling
+-- ==========================================================================
+
+-- One-shot task: remove from the cron file after execution.
+rule CompleteOneShot {
+    when: CronTaskCompleted(bot, task)
+
+    requires: not task.is_periodic
+
+    ensures: not exists task
+    ensures: save_cron_file(bot.directory)
+}
+
+-- Periodic task: calculate next_run, reset to pending, keep in the cron file.
+rule ReschedulePeriodicTask {
+    when: CronTaskCompleted(bot, task)
+
+    requires: task.is_periodic
+
+    ensures: task.status = pending
+    ensures: task.next_run = task.next_run + task.interval
+    ensures: save_cron_file(bot.directory)
+}
+
+
+-- ==========================================================================
 -- Black boxes
 -- ==========================================================================
 
 deferred split_message               -- split text into chunks of at most N characters
 deferred BotConnected                -- establish Discord websocket connection
 deferred BotDisconnected             -- close Discord websocket connection
+deferred CronLoopStarted             -- start background cron polling loop
+deferred ensure_cron_file            -- create .breo/ dir and cron.toml with comment header if missing
+deferred load_cron_file              -- parse .breo/cron.toml into CronFile
+deferred save_cron_file              -- write updated CronFile back to .breo/cron.toml
 
 
 -- ==========================================================================
@@ -320,3 +505,23 @@ deferred BotDisconnected             -- close Discord websocket connection
 -- Configuration changes from Discord persist to directory state, so the next
 --   `breo` CLI command in the same directory picks up the changes.
 -- Access control is per bot profile (each bot has its own allowed_users list).
+-- Cron file lives at .breo/cron.toml in the repo (not in ~/.config/breo).
+-- If the file or .breo/ directory doesn't exist, breo creates them on first poll
+--   with the comment header so the agent knows the format.
+-- The cron file includes a comment header explaining the format, so LLM agents
+--   can read it and manage tasks autonomously via breo messages.
+-- Polling interval is 10 seconds.
+-- Tasks only send messages to breo (no shell commands).
+-- Tasks always use the bot's active conversation. No per-task conversation targeting.
+-- Responses go to both the conversation file and the user's DMs.
+-- user_id is optional in the cron file. If omitted, the bot auto-fills it from
+--   the last authorized Discord user who sent a message. The agent does not need
+--   to know or set the user_id.
+-- One-shot tasks are removed from the file after execution.
+-- Periodic tasks get next_run recalculated (next_run + interval) and stay in the file.
+-- The cron loop runs inside the claws bot process (no separate daemon).
+-- Overlap protection: tasks are marked as "running" before execution.
+--   The poller skips running tasks, preventing duplicate execution when
+--   a task takes longer than the poll interval.
+-- Cron task management is done by the LLM agent editing .breo/cron.toml,
+--   not via Discord commands. The comment header in the file guides the agent.

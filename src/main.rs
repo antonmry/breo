@@ -5,8 +5,8 @@ use clap_complete::engine::{
 };
 use clap_complete::env::CompleteEnv;
 use serde::{Deserialize, Serialize};
-use serenity::all::ChannelId;
 use serenity::all::GatewayIntents;
+use serenity::all::UserId;
 use serenity::async_trait;
 use serenity::model::channel::Message as DiscordMessage;
 use serenity::model::gateway::Ready;
@@ -1287,21 +1287,26 @@ const CRON_FILE_HEADER: &str = r#"# breo cron - scheduled messages for the claws
 #
 # The claws bot polls this file every 10 seconds. When a task's next_run
 # time has passed, the bot sends the message to breo (using the bot's active
-# conversation and agent) and posts the response to the specified Discord channel.
+# conversation and agent) and sends the response via DM to the user who
+# last messaged the bot.
 #
 # Fields:
 #   name       - unique task identifier
 #   message    - the message to send to breo (the LLM agent will execute this)
-#   channel_id - Discord channel ID where the response will be posted
 #   next_run   - ISO 8601 datetime for the next execution (e.g. 2026-02-24T09:00:00)
 #   interval   - (optional) duration between runs (e.g. "24h", "1h", "30m")
 #                if omitted, the task runs once and is removed
 #   status     - task state: "pending" (waiting), "running" (in progress)
 #                do not manually set to "running" - the bot manages this
 #
+# Note: user_id is auto-filled by the bot (from the last Discord message sender).
+# You do not need to set it.
+#
 # One-shot tasks are removed after execution.
 # Periodic tasks get next_run recalculated (next_run + interval) automatically.
-# To add a new task, append a [[task]] entry and the bot will pick it up.
+# To schedule a task: write a [[task]] entry to this file, then reply to the
+# user confirming the task has been scheduled (include the name, next_run time,
+# and whether it is periodic or one-shot).
 # To cancel a task, delete its [[task]] entry.
 #
 # Example:
@@ -1309,7 +1314,6 @@ const CRON_FILE_HEADER: &str = r#"# breo cron - scheduled messages for the claws
 #   [[task]]
 #   name = "daily-status"
 #   message = "Check the logs and report any errors from the last 24 hours"
-#   channel_id = "1293645173758365738"
 #   next_run = 2026-02-24T09:00:00
 #   interval = "24h"
 #   status = "pending"
@@ -1317,7 +1321,6 @@ const CRON_FILE_HEADER: &str = r#"# breo cron - scheduled messages for the claws
 #   [[task]]
 #   name = "one-shot-reminder"
 #   message = "Summarize the current state of the feature branch"
-#   channel_id = "1293645173758365738"
 #   next_run = 2026-02-24T15:30:00
 #   status = "pending"
 "#;
@@ -1332,7 +1335,7 @@ enum CronTaskStatus {
 struct CronTask {
     name: String,
     message: String,
-    channel_id: String,
+    user_id: Option<String>,
     next_run: NaiveDateTime,
     interval: Option<String>,
     status: CronTaskStatus,
@@ -1395,7 +1398,10 @@ fn parse_cron_task(value: &toml::Value) -> Option<CronTask> {
     let table = value.as_table()?;
     let name = table.get("name")?.as_str()?.to_string();
     let message = table.get("message")?.as_str()?.to_string();
-    let channel_id = table.get("channel_id")?.as_str()?.to_string();
+    let user_id = table
+        .get("user_id")
+        .and_then(toml::Value::as_str)
+        .map(ToString::to_string);
     let next_run_raw = table.get("next_run")?;
     let next_run_text = match next_run_raw {
         toml::Value::String(s) => s.clone(),
@@ -1421,7 +1427,7 @@ fn parse_cron_task(value: &toml::Value) -> Option<CronTask> {
     Some(CronTask {
         name,
         message,
-        channel_id,
+        user_id,
         next_run,
         interval,
         status,
@@ -1461,7 +1467,9 @@ fn save_cron_tasks(tasks: &[CronTask]) {
         out.push_str("[[task]]\n");
         out.push_str(&format!("name = {}\n", toml_quoted(&task.name)));
         out.push_str(&format!("message = {}\n", toml_quoted(&task.message)));
-        out.push_str(&format!("channel_id = {}\n", toml_quoted(&task.channel_id)));
+        if let Some(uid) = &task.user_id {
+            out.push_str(&format!("user_id = {}\n", toml_quoted(uid)));
+        }
         out.push_str(&format!(
             "next_run = {}\n",
             task.next_run.format("%Y-%m-%dT%H:%M:%S")
@@ -1805,6 +1813,7 @@ struct DiscordBotState {
     push: bool,
     allowed_users: Vec<String>,
     cron_started: bool,
+    last_user_id: Option<String>,
 }
 
 struct ClawsHandler {
@@ -2032,10 +2041,22 @@ async fn execute_cron_task(
     let model = state_snapshot.model;
     let sandbox = state_snapshot.sandbox;
     let push = state_snapshot.push;
+    let last_user_id = state_snapshot.last_user_id;
     let task_name = task.name.clone();
     let task_message = task.message.clone();
     let interval = task.interval.clone();
     let previous_next_run = task.next_run;
+
+    // Resolve user_id: task-level > last message sender
+    let resolved_user_id = task.user_id.clone().or(last_user_id);
+    let Some(user_id_str) = resolved_user_id else {
+        eprintln!(
+            "[cron] No user_id for task '{}' and no previous message sender. Skipping.",
+            task_name
+        );
+        complete_cron_task(&task_name, previous_next_run, interval.as_deref());
+        return;
+    };
 
     let send_result = tokio::task::spawn_blocking(move || {
         let (_, response_or_err, success) = cmd_send_inner(
@@ -2056,30 +2077,38 @@ async fn execute_cron_task(
     })
     .await;
 
+    let uid: u64 = match user_id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            eprintln!(
+                "[cron] Invalid user_id '{}' for task '{}'.",
+                user_id_str, task_name
+            );
+            complete_cron_task(&task_name, previous_next_run, interval.as_deref());
+            return;
+        }
+    };
+
+    let dm_channel = match UserId::new(uid).create_dm_channel(&http).await {
+        Ok(ch) => ch,
+        Err(e) => {
+            eprintln!(
+                "[cron] Failed to open DM for user '{}' (task '{}'): {e}",
+                user_id_str, task_name
+            );
+            complete_cron_task(&task_name, previous_next_run, interval.as_deref());
+            return;
+        }
+    };
+
     match send_result {
         Ok(Ok(response)) => {
-            let channel_id: u64 = match task.channel_id.parse() {
-                Ok(id) => id,
-                Err(_) => {
-                    eprintln!(
-                        "[cron] Invalid channel_id '{}' for task '{}'.",
-                        task.channel_id, task_name
-                    );
-                    complete_cron_task(&task_name, previous_next_run, interval.as_deref());
-                    return;
-                }
-            };
-
             for chunk in split_for_discord(&response, 2000) {
-                if let Err(e) = ChannelId::new(channel_id).say(&http, chunk).await {
-                    eprintln!(
-                        "[cron] Failed to send message for task '{}': {e}",
-                        task_name
-                    );
+                if let Err(e) = dm_channel.say(&http, chunk).await {
+                    eprintln!("[cron] Failed to DM user for task '{}': {e}", task_name);
                     break;
                 }
             }
-
             complete_cron_task(&task_name, previous_next_run, interval.as_deref());
         }
         Ok(Err(err)) => {
@@ -2088,14 +2117,7 @@ async fn execute_cron_task(
                 task_name,
                 truncate_display(&err, 120)
             );
-            let channel_id: u64 = match task.channel_id.parse() {
-                Ok(id) => id,
-                Err(_) => {
-                    complete_cron_task(&task_name, previous_next_run, interval.as_deref());
-                    return;
-                }
-            };
-            let _ = ChannelId::new(channel_id)
+            let _ = dm_channel
                 .say(&http, format!("Cron task '{task_name}' failed: {err}"))
                 .await;
             complete_cron_task(&task_name, previous_next_run, interval.as_deref());
@@ -2171,6 +2193,13 @@ impl EventHandler for ClawsHandler {
         if !allowed_users.contains(&user_id) {
             let _ = self.send_text(&ctx, &msg, "Access denied.").await;
             return;
+        }
+
+        // Track last authorized sender for cron DM delivery (skip bot's own ID)
+        let bot_id = ctx.cache.current_user().id;
+        if msg.author.id != bot_id {
+            let mut state = self.state.lock().await;
+            state.last_user_id = Some(user_id.clone());
         }
 
         let content = strip_leading_mentions(&msg.content);
@@ -2278,6 +2307,7 @@ fn cmd_claws(
             push,
             allowed_users,
             cron_started: false,
+            last_user_id: None,
         }));
 
         let handler = ClawsHandler {
