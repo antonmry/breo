@@ -1,9 +1,11 @@
+use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDateTime};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{
     ArgValueCandidates, ArgValueCompleter, CompletionCandidate, PathCompleter,
 };
 use clap_complete::env::CompleteEnv;
 use serde::{Deserialize, Serialize};
+use serenity::all::ChannelId;
 use serenity::all::GatewayIntents;
 use serenity::async_trait;
 use serenity::model::channel::Message as DiscordMessage;
@@ -17,6 +19,7 @@ use std::io::{self, Cursor, IsTerminal, Read as _};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use tokio::time::{Duration, sleep};
 
 #[derive(Deserialize)]
 #[serde(default)]
@@ -374,10 +377,51 @@ enum Commands {
         no_sandbox: bool,
     },
     /// Start the Discord bot bridge for the current directory
+    #[command(long_about = "\
+Start the Discord bot bridge for the current directory.
+
+The bot responds to DMs and @mentions in channels. Messages are routed
+through the same LLM backend as `breo send`, with full conversation
+persistence.
+
+Bot commands (send as a Discord message):
+  !switch <name>    Switch to a different conversation
+  !new <name>       Create a new conversation and switch to it
+  !list             List all conversations
+  !status           Show bot name, directory, conversation, agent, model, sandbox
+  !agent <backend>  Change the LLM backend (claude, codex, gemini, ...)
+  !model <name>     Change the model
+  !compact           Summarize the current conversation to save context
+
+Scheduling:
+  The bot also polls .breo/cron.toml every 10s and executes due tasks.
+  One-shot tasks are removed after execution.
+  Periodic tasks are rescheduled using next_run + interval.
+
+Configuration:
+  Bot profiles are defined in ~/.config/breo/config.toml under
+  [discord.bots.<name>] with keys: bot_token, guild_id, allowed_users.
+  Use `breo claws list` to see configured profiles.")]
     Claws {
         /// Bot profile name, or 'list' to show configured bot profiles
         #[arg(add = ArgValueCandidates::new(list_discord_bots))]
         bot: String,
+
+        /// Override the LLM agent for this bot session
+        #[arg(short, long, value_enum)]
+        agent: Option<Backend>,
+
+        /// Override the model for this bot session
+        #[arg(short, long, add = ArgValueCandidates::new(list_models))]
+        model: Option<String>,
+
+        /// Lima instance name for sandbox
+        #[arg(short, long)]
+        sandbox: Option<String>,
+
+        /// Discord guild ID (overrides profile config)
+        #[arg(long)]
+        guild_id: Option<String>,
     },
 }
 
@@ -1239,6 +1283,246 @@ fn truncate_display(s: &str, max: usize) -> String {
     }
 }
 
+const CRON_FILE_HEADER: &str = r#"# breo cron - scheduled messages for the claws Discord bot
+#
+# The claws bot polls this file every 10 seconds. When a task's next_run
+# time has passed, the bot sends the message to breo (using the bot's active
+# conversation and agent) and posts the response to the specified Discord channel.
+#
+# Fields:
+#   name       - unique task identifier
+#   message    - the message to send to breo (the LLM agent will execute this)
+#   channel_id - Discord channel ID where the response will be posted
+#   next_run   - ISO 8601 datetime for the next execution (e.g. 2026-02-24T09:00:00)
+#   interval   - (optional) duration between runs (e.g. "24h", "1h", "30m")
+#                if omitted, the task runs once and is removed
+#   status     - task state: "pending" (waiting), "running" (in progress)
+#                do not manually set to "running" - the bot manages this
+#
+# One-shot tasks are removed after execution.
+# Periodic tasks get next_run recalculated (next_run + interval) automatically.
+# To add a new task, append a [[task]] entry and the bot will pick it up.
+# To cancel a task, delete its [[task]] entry.
+#
+# Example:
+#
+#   [[task]]
+#   name = "daily-status"
+#   message = "Check the logs and report any errors from the last 24 hours"
+#   channel_id = "1293645173758365738"
+#   next_run = 2026-02-24T09:00:00
+#   interval = "24h"
+#   status = "pending"
+#
+#   [[task]]
+#   name = "one-shot-reminder"
+#   message = "Summarize the current state of the feature branch"
+#   channel_id = "1293645173758365738"
+#   next_run = 2026-02-24T15:30:00
+#   status = "pending"
+"#;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CronTaskStatus {
+    Pending,
+    Running,
+}
+
+#[derive(Clone)]
+struct CronTask {
+    name: String,
+    message: String,
+    channel_id: String,
+    next_run: NaiveDateTime,
+    interval: Option<String>,
+    status: CronTaskStatus,
+}
+
+fn cron_dir() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".breo")
+}
+
+fn cron_file_path() -> PathBuf {
+    cron_dir().join("cron.toml")
+}
+
+fn ensure_cron_file() {
+    let dir = cron_dir();
+    if !dir.exists()
+        && let Err(e) = fs::create_dir_all(&dir)
+    {
+        eprintln!("Failed to create {}: {e}", dir.display());
+        return;
+    }
+
+    let path = cron_file_path();
+    if !path.exists()
+        && let Err(e) = fs::write(&path, format!("{CRON_FILE_HEADER}\n"))
+    {
+        eprintln!("Failed to create {}: {e}", path.display());
+    }
+}
+
+fn parse_timestamp(text: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%dT%H:%M:%S")
+        .ok()
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(text.trim())
+                .ok()
+                .map(|dt| dt.naive_local())
+        })
+}
+
+fn parse_interval(text: &str) -> Option<ChronoDuration> {
+    let trimmed = text.trim();
+    if trimmed.len() < 2 {
+        return None;
+    }
+    let (value, unit) = trimmed.split_at(trimmed.len() - 1);
+    let amount: i64 = value.parse().ok()?;
+    match unit {
+        "s" => Some(ChronoDuration::seconds(amount)),
+        "m" => Some(ChronoDuration::minutes(amount)),
+        "h" => Some(ChronoDuration::hours(amount)),
+        "d" => Some(ChronoDuration::days(amount)),
+        _ => None,
+    }
+}
+
+fn parse_cron_task(value: &toml::Value) -> Option<CronTask> {
+    let table = value.as_table()?;
+    let name = table.get("name")?.as_str()?.to_string();
+    let message = table.get("message")?.as_str()?.to_string();
+    let channel_id = table.get("channel_id")?.as_str()?.to_string();
+    let next_run_raw = table.get("next_run")?;
+    let next_run_text = match next_run_raw {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Datetime(dt) => dt.to_string(),
+        _ => return None,
+    };
+    let next_run = parse_timestamp(&next_run_text)?;
+    let interval = table
+        .get("interval")
+        .and_then(toml::Value::as_str)
+        .map(ToString::to_string);
+    let status = match table
+        .get("status")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("pending")
+        .to_lowercase()
+        .as_str()
+    {
+        "running" => CronTaskStatus::Running,
+        _ => CronTaskStatus::Pending,
+    };
+
+    Some(CronTask {
+        name,
+        message,
+        channel_id,
+        next_run,
+        interval,
+        status,
+    })
+}
+
+fn load_cron_tasks() -> Vec<CronTask> {
+    ensure_cron_file();
+    let path = cron_file_path();
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+        eprintln!("[cron] Failed to parse {}.", path.display());
+        return Vec::new();
+    };
+
+    value
+        .get("task")
+        .and_then(toml::Value::as_array)
+        .map(|tasks| tasks.iter().filter_map(parse_cron_task).collect())
+        .unwrap_or_default()
+}
+
+fn toml_quoted(value: &str) -> String {
+    toml::Value::String(value.to_string()).to_string()
+}
+
+fn save_cron_tasks(tasks: &[CronTask]) {
+    ensure_cron_file();
+    let path = cron_file_path();
+    let mut out = String::new();
+    out.push_str(CRON_FILE_HEADER);
+    out.push('\n');
+
+    for task in tasks {
+        out.push_str("[[task]]\n");
+        out.push_str(&format!("name = {}\n", toml_quoted(&task.name)));
+        out.push_str(&format!("message = {}\n", toml_quoted(&task.message)));
+        out.push_str(&format!("channel_id = {}\n", toml_quoted(&task.channel_id)));
+        out.push_str(&format!(
+            "next_run = {}\n",
+            task.next_run.format("%Y-%m-%dT%H:%M:%S")
+        ));
+        if let Some(interval) = &task.interval {
+            out.push_str(&format!("interval = {}\n", toml_quoted(interval)));
+        }
+        let status = match task.status {
+            CronTaskStatus::Pending => "pending",
+            CronTaskStatus::Running => "running",
+        };
+        out.push_str(&format!("status = {}\n\n", toml_quoted(status)));
+    }
+
+    if let Err(e) = fs::write(&path, out) {
+        eprintln!("Failed to write {}: {e}", path.display());
+    }
+}
+
+fn mark_task_running(task_name: &str) -> Option<CronTask> {
+    let mut tasks = load_cron_tasks();
+    let mut selected = None;
+    let now = Local::now().naive_local();
+
+    for task in &mut tasks {
+        if task.name == task_name && task.status == CronTaskStatus::Pending && task.next_run <= now
+        {
+            task.status = CronTaskStatus::Running;
+            selected = Some(task.clone());
+            break;
+        }
+    }
+
+    if selected.is_some() {
+        save_cron_tasks(&tasks);
+    }
+    selected
+}
+
+fn complete_cron_task(task_name: &str, previous_next_run: NaiveDateTime, interval: Option<&str>) {
+    let mut tasks = load_cron_tasks();
+
+    if let Some(index) = tasks.iter().position(|task| task.name == task_name) {
+        if let Some(interval_text) = interval {
+            if let Some(step) = parse_interval(interval_text) {
+                tasks[index].status = CronTaskStatus::Pending;
+                tasks[index].next_run = previous_next_run + step;
+            } else {
+                eprintln!(
+                    "[cron] Invalid interval '{}' for task '{}', removing task.",
+                    interval_text, task_name
+                );
+                tasks.remove(index);
+            }
+        } else {
+            tasks.remove(index);
+        }
+        save_cron_tasks(&tasks);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_send_inner(
     message: &str,
@@ -1520,6 +1804,7 @@ struct DiscordBotState {
     sandbox: Option<String>,
     push: bool,
     allowed_users: Vec<String>,
+    cron_started: bool,
 }
 
 struct ClawsHandler {
@@ -1735,10 +2020,136 @@ impl ClawsHandler {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn execute_cron_task(
+    http: Arc<serenity::http::Http>,
+    state: Arc<tokio::sync::Mutex<DiscordBotState>>,
+    task: CronTask,
+) {
+    let state_snapshot = state.lock().await.clone();
+    let conversation = state_snapshot.conversation;
+    let backend = state_snapshot.backend;
+    let model = state_snapshot.model;
+    let sandbox = state_snapshot.sandbox;
+    let push = state_snapshot.push;
+    let task_name = task.name.clone();
+    let task_message = task.message.clone();
+    let interval = task.interval.clone();
+    let previous_next_run = task.next_run;
+
+    let send_result = tokio::task::spawn_blocking(move || {
+        let (_, response_or_err, success) = cmd_send_inner(
+            &task_message,
+            Some(&conversation),
+            model.as_deref(),
+            &backend,
+            &[],
+            sandbox.as_deref(),
+            push,
+            false,
+        );
+        if success {
+            Ok(response_or_err)
+        } else {
+            Err(response_or_err)
+        }
+    })
+    .await;
+
+    match send_result {
+        Ok(Ok(response)) => {
+            let channel_id: u64 = match task.channel_id.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    eprintln!(
+                        "[cron] Invalid channel_id '{}' for task '{}'.",
+                        task.channel_id, task_name
+                    );
+                    complete_cron_task(&task_name, previous_next_run, interval.as_deref());
+                    return;
+                }
+            };
+
+            for chunk in split_for_discord(&response, 2000) {
+                if let Err(e) = ChannelId::new(channel_id).say(&http, chunk).await {
+                    eprintln!(
+                        "[cron] Failed to send message for task '{}': {e}",
+                        task_name
+                    );
+                    break;
+                }
+            }
+
+            complete_cron_task(&task_name, previous_next_run, interval.as_deref());
+        }
+        Ok(Err(err)) => {
+            eprintln!(
+                "[cron] Task '{}' failed: {}",
+                task_name,
+                truncate_display(&err, 120)
+            );
+            let channel_id: u64 = match task.channel_id.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    complete_cron_task(&task_name, previous_next_run, interval.as_deref());
+                    return;
+                }
+            };
+            let _ = ChannelId::new(channel_id)
+                .say(&http, format!("Cron task '{task_name}' failed: {err}"))
+                .await;
+            complete_cron_task(&task_name, previous_next_run, interval.as_deref());
+        }
+        Err(err) => {
+            eprintln!("[cron] Worker failure for task '{}': {err}", task_name);
+            complete_cron_task(&task_name, previous_next_run, interval.as_deref());
+        }
+    }
+}
+
+async fn cron_poll_loop(
+    http: Arc<serenity::http::Http>,
+    state: Arc<tokio::sync::Mutex<DiscordBotState>>,
+) {
+    loop {
+        ensure_cron_file();
+        let now = Local::now().naive_local();
+        let due_pending_names: Vec<String> = load_cron_tasks()
+            .into_iter()
+            .filter(|task| task.status == CronTaskStatus::Pending && task.next_run <= now)
+            .map(|task| task.name)
+            .collect();
+
+        for task_name in due_pending_names {
+            if let Some(task) = mark_task_running(&task_name) {
+                execute_cron_task(http.clone(), state.clone(), task).await;
+            }
+        }
+
+        sleep(Duration::from_secs(10)).await;
+    }
+}
+
 #[async_trait]
 impl EventHandler for ClawsHandler {
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         eprintln!("[claws] Connected as {}", ready.user.name);
+        ensure_cron_file();
+
+        let should_start = {
+            let mut state = self.state.lock().await;
+            if state.cron_started {
+                false
+            } else {
+                state.cron_started = true;
+                true
+            }
+        };
+
+        if should_start {
+            tokio::spawn(cron_poll_loop(ctx.http.clone(), self.state.clone()));
+            eprintln!("[cron] Polling {}", cron_file_path().display());
+        }
     }
 
     async fn message(&self, ctx: Context, msg: DiscordMessage) {
@@ -1866,6 +2277,7 @@ fn cmd_claws(
             sandbox,
             push,
             allowed_users,
+            cron_started: false,
         }));
 
         let handler = ClawsHandler {
@@ -1976,7 +2388,16 @@ fn main() {
         (_, Some(Commands::Status)) => cmd_status(),
         (_, Some(Commands::Setup { shell })) => cmd_setup(&shell),
         (_, Some(Commands::Compact { name })) => cmd_compact(name.as_deref(), sandbox, push),
-        (_, Some(Commands::Claws { bot })) => {
+        (
+            _,
+            Some(Commands::Claws {
+                bot,
+                agent: claws_agent,
+                model: claws_model,
+                sandbox: claws_sandbox,
+                guild_id: claws_guild_id,
+            }),
+        ) => {
             if bot == "list" {
                 cmd_claws_list(&config);
                 return;
@@ -1996,14 +2417,20 @@ fn main() {
                 std::process::exit(1);
             }
 
+            // CLI flags override global config for claws session
+            let claws_backend = claws_agent.unwrap_or(backend);
+            let claws_resolved_model = claws_model.or(resolved_model);
+            let claws_sandbox_name = claws_sandbox.or(sandbox_name);
+            let claws_guild = claws_guild_id.or(profile.guild_id);
+
             cmd_claws(
                 &profile.name,
                 &profile.bot_token,
-                profile.guild_id,
+                claws_guild,
                 profile.allowed_users,
-                backend.clone(),
-                resolved_model.clone(),
-                sandbox_name.clone(),
+                claws_backend,
+                claws_resolved_model,
+                claws_sandbox_name,
                 push,
             );
         }

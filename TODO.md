@@ -1,6 +1,8 @@
 # TODO
 
+- [ ] Claws: Discord channel per project
 - [ ] Claws: support loop command
+- [ ] Claws: help should show what text commands are available
 - [ ] Better track of progress?
 - [ ] Specs: with Allium?
 - [ ] Specs: one crate per spec
@@ -19,3 +21,4 @@
 - [x] Able to select the model
 - [x] Claws
 - [x] Claws: support multiple bots
+- [x] Claws: support cron commands
