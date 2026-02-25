@@ -1,18 +1,21 @@
 # TODO
 
+- [ ] Shell: send a notification via Discord with a flag (msg and loop)
 - [ ] Claws: support loop command
 - [ ] Shell: better track of progress?
 - [ ] Specs: with Allium?
-- [ ] Specs: one crate per spec
 - [ ] Specs: TTS and STT
 - [ ] Shell: paste images
-- [ ] Shell: send a notification via Discord with a flag (msg and loop)
 - [ ] Shell: how to keep models updated?
 - [ ] Shell: install via Skill?
+- [ ] Testing: cargo-mutants, miri (concurrency, unsafe), fuzz (input), E2E?
+- [ ] Add LICENSE and CONTRIBUTING.md
+- [ ] Add landing page?
 - [ ] Skills?
 - [ ] MCP? Other features?
 - [ ] Z behaviour to navigate conversations
 - [ ] Sandboxing with <https://github.com/boxlite-ai/boxlite>
+- [x] Specs: one crate per spec
 - [x] Auto-completion
 - [x] Compaction
 - [x] It should work with gemini

@@ -24,3 +24,11 @@ language = "system"
 entry = "bash -c 'rumdl check --fix; exit 0'"
 types = ["markdown"]
 pass_filenames = false
+
+[[repos.hooks]]
+id = "cargo-coverage"
+name = "cargo llvm-cov (80% per file)"
+language = "system"
+entry = "bash scripts/check_coverage.sh"
+types = ["rust"]
+pass_filenames = false
