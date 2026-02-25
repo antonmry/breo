@@ -217,6 +217,9 @@ fn list_models() -> Vec<CompletionCandidate> {
         CompletionCandidate::new("o3").help(Some("o3 (200k)".into())),
         CompletionCandidate::new("o4-mini").help(Some("o4-mini (200k)".into())),
         // Gemini
+        CompletionCandidate::new("gemini-3.1-pro-preview").help(Some("Gemini 3.1 Pro (1M)".into())),
+        CompletionCandidate::new("gemini-3-pro-preview").help(Some("Gemini 3 Pro (1M)".into())),
+        CompletionCandidate::new("gemini-3-flash-preview").help(Some("Gemini 3 Flash (1M)".into())),
         CompletionCandidate::new("gemini-2.5-pro").help(Some("Gemini 2.5 Pro (1M)".into())),
         CompletionCandidate::new("gemini-2.5-flash").help(Some("Gemini 2.5 Flash (1M)".into())),
     ]

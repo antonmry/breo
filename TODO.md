@@ -7,6 +7,7 @@
 - [ ] Specs: TTS and STT
 - [ ] Shell: paste images
 - [ ] Shell: send a notification via Discord with a flag (msg and loop)
+- [ ] Shell: how to keep models updated?
 - [ ] Skills?
 - [ ] MCP? Other features?
 - [ ] Z behaviour to navigate conversations

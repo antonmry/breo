@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install script for breo
-# Usage: curl -fsSL https://raw.githubusercontent.com/antonmry/breo/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/antonmry/breo/main/scripts/install.sh | bash
 
 set -eu
 

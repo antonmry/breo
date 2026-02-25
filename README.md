@@ -12,7 +12,7 @@ provides an automated implement/validate loop for agentic coding workflows.
 ### Quick install (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antonmry/breo/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/antonmry/breo/main/scripts/install.sh | bash
 ```
 
 This downloads the latest binary for your platform, installs it to
@@ -58,23 +58,25 @@ breo -f src/main.rs "Review this code"
 
 ## Commands
 
-| Command                           | Description                                       |
-| --------------------------------- | ------------------------------------------------- |
-| `breo <message>`                  | Send a message to the active conversation         |
-| `breo new <name>`                 | Create a new conversation and switch to it        |
-| `breo list`                       | List all conversations for the current directory  |
-| `breo pick`                       | Fuzzy-pick a conversation (for shell integration) |
-| `breo status`                     | Show active conversation, agent, and sandbox      |
-| `breo compact [name]`             | Summarize a conversation to save context          |
-| `breo setup <shell>`              | Print shell setup for TAB completion              |
-| `breo loop <plan> <verification>` | Run an implement/validate loop                    |
-| `breo claws`                      | Start a Discord DM/@mention bridge                |
+| Command                           | Description                                          |
+| --------------------------------- | ---------------------------------------------------- |
+| `breo <message>`                  | Send a message to the active conversation            |
+| `breo new <name>`                 | Create a new conversation and switch to it           |
+| `breo list`                       | List all conversations for the current directory     |
+| `breo pick`                       | Fuzzy-pick a conversation (for shell integration)    |
+| `breo rename <old> <new>`         | Rename a conversation                                |
+| `breo status`                     | Show directory, conversation, agent, model, sandbox  |
+| `breo compact [name]`             | Summarize a conversation to save context             |
+| `breo setup <shell>`              | Print shell setup for TAB completion                 |
+| `breo loop <plan> <verification>` | Run an implement/validate loop                       |
+| `breo claws <bot>`                | Start a Discord bridge for a named bot profile       |
+| `breo claws list`                 | List configured bot profiles                         |
 
 ## Options
 
 | Flag                        | Description                                      |
 | --------------------------- | ------------------------------------------------ |
-| `-c, --conversation <name>` | Target a specific conversation without switching |
+| `-c, --conversation <name>` | Target a specific conversation and switch to it |
 | `-m, --model <model>`       | Model to use (see [Models](#models))             |
 | `-a, --agent <backend>`     | Backend: `claude`, `codex`, or `gemini`          |
 | `-f, --files <path>...`     | Attach files to the prompt                       |
@@ -94,17 +96,20 @@ breo dispatches to different LLM CLI tools depending on the selected backend:
 
 ### Models
 
-| Model              | Backend | Context Window |
-| ------------------ | ------- | -------------- |
-| `sonnet`           | Claude  | 200K           |
-| `opus`             | Claude  | 200K           |
-| `haiku`            | Claude  | 200K           |
-| `gpt-5`            | Codex   | 400K           |
-| `gpt-5-mini`       | Codex   | 400K           |
-| `o3`               | Codex   | 200K           |
-| `o4-mini`          | Codex   | 200K           |
-| `gemini-2.5-pro`   | Gemini  | 1M             |
-| `gemini-2.5-flash` | Gemini  | 1M             |
+| Model                      | Backend | Context Window |
+| -------------------------- | ------- | -------------- |
+| `sonnet`                   | Claude  | 200K           |
+| `opus`                     | Claude  | 200K           |
+| `haiku`                    | Claude  | 200K           |
+| `gpt-5`                    | Codex   | 400K           |
+| `gpt-5-mini`               | Codex   | 400K           |
+| `o3`                       | Codex   | 200K           |
+| `o4-mini`                  | Codex   | 200K           |
+| `gemini-3.1-pro-preview`   | Gemini  | 1M             |
+| `gemini-3-pro-preview`     | Gemini  | 1M             |
+| `gemini-3-flash-preview`   | Gemini  | 1M             |
+| `gemini-2.5-pro`           | Gemini  | 1M             |
+| `gemini-2.5-flash`         | Gemini  | 1M             |
 
 ## Conversations
 
@@ -181,6 +186,69 @@ breo --no-sandbox "Just answer a question"
 
 Requires [Lima](https://lima-vm.io/) with the backend CLI tools installed inside the VM.
 
+## Discord Bridge (claws)
+
+The `claws` command connects breo to Discord as a bot. You can chat with breo
+via DMs or @mentions in channels. Multiple bot profiles are supported.
+
+```bash
+# List configured bots
+breo claws list
+
+# Start a bot
+breo claws mybot
+
+# Start with overrides
+breo claws mybot --agent gemini --model gemini-3-pro-preview --sandbox my-vm
+
+# Set response destination (channel ID or "dm")
+breo claws mybot -d 1234567890
+```
+
+### Bot Commands
+
+Once the bot is running, send these commands in Discord:
+
+| Command              | Description                                |
+| -------------------- | ------------------------------------------ |
+| `!switch <name>`     | Switch to a different conversation         |
+| `!new <name>`        | Create a new conversation and switch to it |
+| `!list`              | List conversations (active marked with *)  |
+| `!status`            | Show bot, directory, conversation, agent, model, sandbox, destination |
+| `!agent <name>`      | Switch backend (claude, codex, gemini)     |
+| `!model <name>`      | Switch model                               |
+| `!destination <target>` | Set response destination (channel ID or "dm") |
+| `!compact`           | Compact the active conversation            |
+
+All commands require the user to be in the bot's `allowed_users` list.
+Long responses are automatically split into multiple messages (2000 char limit).
+
+### Cron Scheduling
+
+The bot polls `.breo/cron.toml` every 10 seconds for scheduled tasks. Tasks are
+messages sent to breo on a schedule, with responses delivered to the bot's
+configured destination.
+
+```toml
+# One-shot task (runs once, then removed)
+[[task]]
+name = "one-shot-reminder"
+message = "Summarize the current state of the feature branch"
+next_run = 2026-02-24T15:30:00
+status = "pending"
+
+# Periodic task (runs every 24 hours)
+[[task]]
+name = "daily-status"
+message = "Check the logs and report any errors from the last 24 hours"
+next_run = 2026-02-24T09:00:00
+interval = "24h"
+status = "pending"
+```
+
+The cron file is auto-created with a comment header when the bot starts, so LLM
+agents can read the format and manage tasks autonomously.
+
 ## Loop Mode
 
 The `loop` command runs an automated implement/validate cycle, useful for
@@ -247,13 +315,28 @@ sandbox_name = "default"
 # Auto-push after commits
 push = true
 
-# Discord bridge (for `breo claws`)
-[discord]
+# Discord bot profiles (for `breo claws`)
+[discord.bots.mybot]
 bot_token = "YOUR_DISCORD_BOT_TOKEN"
 guild_id = "OPTIONAL_GUILD_ID"
 allowed_users = ["YOUR_DISCORD_USER_ID"]
+
+# Multiple bots supported
+[discord.bots.another]
+bot_token = "ANOTHER_BOT_TOKEN"
+allowed_users = ["USER_ID_1", "USER_ID_2"]
 ```
 
-All config values can be overridden per-command with CLI flags. Per-directory
-state (active conversation, agent, sandbox) is persisted in
-`~/.config/breo/state.toml`.
+### Resolution Cascades
+
+Settings are resolved in order of precedence:
+
+| Setting     | CLI flag       | Per-directory state | Global config   |
+| ----------- | -------------- | ------------------- | --------------- |
+| Backend     | `--agent`      | last used agent     | `agent`         |
+| Model       | `--model`      | last used model     | backend default |
+| Sandbox     | `--sandbox`    | last used sandbox   | `sandbox_name`  |
+| Destination | `-d`           | last set destination| DM (default)    |
+
+Per-directory state (active conversation, agent, model, sandbox, destination) is
+persisted in `~/.config/breo/state.toml` and carries across invocations.
