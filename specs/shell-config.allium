@@ -37,7 +37,16 @@ entity DirectoryState {
     agent: String?
     model: String?
     sandbox: String?
+    discord_destination: DiscordDestination?
     dir_id: String?
+}
+
+-- Where Discord responses are delivered for this directory's conversations.
+-- Can be a channel ID or a DM to a specific user.
+-- Default: DM to the first user in the bot's allowed_users list.
+value DiscordDestination {
+    kind: channel | dm
+    target: String                                   -- channel ID or user ID
 }
 
 
@@ -97,6 +106,22 @@ rule ResolveSandbox {
     )
 }
 
+-- Discord destination resolution: CLI -d > directory state > default (DM to first allowed user).
+-- Determines where Discord responses are delivered.
+rule ResolveDiscordDestination {
+    when: ResolveDiscordDestination(cli_destination, directory_state, bot_profile)
+
+    ensures: ResolvedDiscordDestination(
+        destination:
+            if cli_destination != null:
+                cli_destination
+            else if directory_state.discord_destination != null:
+                directory_state.discord_destination
+            else:
+                DiscordDestination(kind: dm, target: bot_profile.allowed_users.first)
+    )
+}
+
 -- Push resolution: --no-push flag > global config.
 rule ResolvePush {
     when: ResolvePush(no_push, global_config)
@@ -118,12 +143,13 @@ rule ResolvePush {
 -- After sending a message or completing a loop, save the active settings
 -- back to directory state so they persist across invocations.
 rule PersistDirectoryState {
-    when: PersistDirectoryState(directory, conversation_name, backend_name, model_name, sandbox_name)
+    when: PersistDirectoryState(directory, conversation_name, backend_name, model_name, sandbox_name, discord_destination)
 
     ensures: directory_state.active_conversation = conversation_name
     ensures: directory_state.agent = backend_name
     ensures: directory_state.model = model_name
     ensures: directory_state.sandbox = sandbox_name
+    ensures: directory_state.discord_destination = discord_destination
 }
 
 
@@ -194,7 +220,8 @@ rule ShowStatus {
         active_conversation: state.active_conversation,
         agent: state.agent,
         model: state.model,
-        sandbox: state.sandbox
+        sandbox: state.sandbox,
+        discord_destination: state.discord_destination
     )
 }
 
@@ -214,6 +241,10 @@ deferred directory_conversations_path  -- ~/.config/breo/conversations/<dir-id>
 
 -- Per-directory state now includes a preferred model (in addition to agent).
 --   Resolution cascade: CLI --model > directory state > backend default.
+-- Per-directory state includes a Discord destination (channel or DM).
+--   Resolution cascade: CLI -d > directory state > default (DM to first allowed user).
+--   Accepted values: a channel ID (delivers to channel) or "dm" (delivers via DM).
+--   Default is DM to the first user in the bot's allowed_users list.
 -- Fuzzy picker filters by conversation name only. Content search is out of scope.
 -- No per-directory config files. Global config (~/.config/breo/config.toml) only.
 

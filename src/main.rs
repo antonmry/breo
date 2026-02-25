@@ -5,8 +5,7 @@ use clap_complete::engine::{
 };
 use clap_complete::env::CompleteEnv;
 use serde::{Deserialize, Serialize};
-use serenity::all::GatewayIntents;
-use serenity::all::UserId;
+use serenity::all::{ChannelId, GatewayIntents, UserId};
 use serenity::async_trait;
 use serenity::model::channel::Message as DiscordMessage;
 use serenity::model::gateway::Ready;
@@ -163,6 +162,7 @@ struct DirState {
     agent: Option<String>,
     model: Option<String>,
     sandbox: Option<String>,
+    discord_destination: Option<String>,
     dir_id: Option<String>,
 }
 
@@ -388,9 +388,10 @@ Bot commands (send as a Discord message):
   !switch <name>    Switch to a different conversation
   !new <name>       Create a new conversation and switch to it
   !list             List all conversations
-  !status           Show bot name, directory, conversation, agent, model, sandbox
+  !status           Show bot name, directory, conversation, agent, model, sandbox, destination
   !agent <backend>  Change the LLM backend (claude, codex, gemini, ...)
   !model <name>     Change the model
+  !destination <channel_id|dm>  Change where responses are delivered
   !compact           Summarize the current conversation to save context
 
 Scheduling:
@@ -422,6 +423,10 @@ Configuration:
         /// Discord guild ID (overrides profile config)
         #[arg(long)]
         guild_id: Option<String>,
+
+        /// Discord response destination: channel ID or 'dm'
+        #[arg(short = 'd', long)]
+        destination: Option<String>,
     },
 }
 
@@ -818,6 +823,10 @@ fn cmd_status() {
     let agent = state.agent.as_deref().unwrap_or("(not set)");
     let model = state.model.as_deref().unwrap_or("(default)");
     let sandbox = state.sandbox.as_deref().unwrap_or("(not set)");
+    let destination = state
+        .discord_destination
+        .as_deref()
+        .unwrap_or("(default dm)");
     println!("directory:    {}", current_dir_key());
     println!("config:       {}", breo_dir().display());
     println!("conversations:{}", dir_conversations_dir().display());
@@ -825,6 +834,7 @@ fn cmd_status() {
     println!("agent:        {agent}");
     println!("model:        {model}");
     println!("sandbox:      {sandbox}");
+    println!("destination:  {destination}");
 }
 
 fn cmd_setup(shell: &ShellType) {
@@ -1157,6 +1167,7 @@ fn persist_dir_state(
     backend: &Backend,
     model: Option<&str>,
     sandbox: Option<&str>,
+    discord_destination: Option<&str>,
     push: bool,
 ) {
     let mut state = load_dir_state();
@@ -1164,6 +1175,7 @@ fn persist_dir_state(
     state.agent = Some(backend_name(backend).to_string());
     state.model = model.map(ToString::to_string);
     state.sandbox = sandbox.map(ToString::to_string);
+    state.discord_destination = discord_destination.map(ToString::to_string);
     save_dir_state(&state);
     git_commit_state(push);
 }
@@ -1287,8 +1299,8 @@ const CRON_FILE_HEADER: &str = r#"# breo cron - scheduled messages for the claws
 #
 # The claws bot polls this file every 10 seconds. When a task's next_run
 # time has passed, the bot sends the message to breo (using the bot's active
-# conversation and agent) and sends the response via DM to the user who
-# last messaged the bot.
+# conversation and agent) and delivers the response to the bot's configured
+# destination (channel or DM).
 #
 # Fields:
 #   name       - unique task identifier
@@ -1298,9 +1310,6 @@ const CRON_FILE_HEADER: &str = r#"# breo cron - scheduled messages for the claws
 #                if omitted, the task runs once and is removed
 #   status     - task state: "pending" (waiting), "running" (in progress)
 #                do not manually set to "running" - the bot manages this
-#
-# Note: user_id is auto-filled by the bot (from the last Discord message sender).
-# You do not need to set it.
 #
 # One-shot tasks are removed after execution.
 # Periodic tasks get next_run recalculated (next_run + interval) automatically.
@@ -1335,7 +1344,6 @@ enum CronTaskStatus {
 struct CronTask {
     name: String,
     message: String,
-    user_id: Option<String>,
     next_run: NaiveDateTime,
     interval: Option<String>,
     status: CronTaskStatus,
@@ -1398,10 +1406,6 @@ fn parse_cron_task(value: &toml::Value) -> Option<CronTask> {
     let table = value.as_table()?;
     let name = table.get("name")?.as_str()?.to_string();
     let message = table.get("message")?.as_str()?.to_string();
-    let user_id = table
-        .get("user_id")
-        .and_then(toml::Value::as_str)
-        .map(ToString::to_string);
     let next_run_raw = table.get("next_run")?;
     let next_run_text = match next_run_raw {
         toml::Value::String(s) => s.clone(),
@@ -1427,7 +1431,6 @@ fn parse_cron_task(value: &toml::Value) -> Option<CronTask> {
     Some(CronTask {
         name,
         message,
-        user_id,
         next_run,
         interval,
         status,
@@ -1467,9 +1470,6 @@ fn save_cron_tasks(tasks: &[CronTask]) {
         out.push_str("[[task]]\n");
         out.push_str(&format!("name = {}\n", toml_quoted(&task.name)));
         out.push_str(&format!("message = {}\n", toml_quoted(&task.message)));
-        if let Some(uid) = &task.user_id {
-            out.push_str(&format!("user_id = {}\n", toml_quoted(uid)));
-        }
         out.push_str(&format!(
             "next_run = {}\n",
             task.next_run.format("%Y-%m-%dT%H:%M:%S")
@@ -1804,16 +1804,49 @@ fn parse_bot_command(input: &str) -> Option<(String, String)> {
 }
 
 #[derive(Clone)]
+enum DiscordDestination {
+    Channel(String),
+    Dm,
+}
+
+impl DiscordDestination {
+    fn parse(value: &str) -> Option<Self> {
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("dm") {
+            return Some(Self::Dm);
+        }
+        if !trimmed.is_empty() {
+            return Some(Self::Channel(trimmed.to_string()));
+        }
+        None
+    }
+
+    fn to_storage(&self) -> String {
+        match self {
+            Self::Dm => "dm".to_string(),
+            Self::Channel(id) => id.clone(),
+        }
+    }
+
+    fn display(&self) -> String {
+        match self {
+            Self::Dm => "dm".to_string(),
+            Self::Channel(id) => format!("channel {id}"),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct DiscordBotState {
     bot_name: String,
     conversation: String,
     backend: Backend,
     model: Option<String>,
     sandbox: Option<String>,
+    destination: DiscordDestination,
     push: bool,
     allowed_users: Vec<String>,
     cron_started: bool,
-    last_user_id: Option<String>,
 }
 
 struct ClawsHandler {
@@ -1821,7 +1854,7 @@ struct ClawsHandler {
 }
 
 impl ClawsHandler {
-    async fn send_text(
+    async fn send_text_to_source(
         &self,
         ctx: &Context,
         msg: &DiscordMessage,
@@ -1831,6 +1864,54 @@ impl ClawsHandler {
             msg.channel_id.say(&ctx.http, chunk).await?;
         }
         Ok(())
+    }
+
+    async fn send_to_destination(
+        http: &serenity::http::Http,
+        destination: &DiscordDestination,
+        allowed_users: &[String],
+        text: &str,
+    ) -> serenity::Result<()> {
+        match destination {
+            DiscordDestination::Channel(channel_id) => {
+                let channel_id_num: u64 = match channel_id.parse() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        eprintln!("[claws] Invalid channel destination '{}'", channel_id);
+                        return Ok(());
+                    }
+                };
+                for chunk in split_for_discord(text, 2000) {
+                    ChannelId::new(channel_id_num).say(http, chunk).await?;
+                }
+            }
+            DiscordDestination::Dm => {
+                let Some(first_allowed) = allowed_users.first() else {
+                    eprintln!("[claws] No allowed_users configured for DM destination");
+                    return Ok(());
+                };
+                let user_id_num: u64 = match first_allowed.parse() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        eprintln!("[claws] Invalid allowed user id '{}'", first_allowed);
+                        return Ok(());
+                    }
+                };
+                let dm = UserId::new(user_id_num).create_dm_channel(http).await?;
+                for chunk in split_for_discord(text, 2000) {
+                    dm.say(http, chunk).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_to_state_destination(&self, ctx: &Context, text: &str) -> serenity::Result<()> {
+        let (destination, allowed_users) = {
+            let state = self.state.lock().await;
+            (state.destination.clone(), state.allowed_users.clone())
+        };
+        Self::send_to_destination(&ctx.http, &destination, &allowed_users, text).await
     }
 
     async fn handle_command(
@@ -1844,11 +1925,13 @@ impl ClawsHandler {
             "switch" => {
                 if arg.is_empty() {
                     return self
-                        .send_text(ctx, msg, "Usage: !switch <conversation>")
+                        .send_text_to_source(ctx, msg, "Usage: !switch <conversation>")
                         .await;
                 }
                 if !conversation_path(arg).exists() {
-                    return self.send_text(ctx, msg, "Conversation not found.").await;
+                    return self
+                        .send_text_to_source(ctx, msg, "Conversation not found.")
+                        .await;
                 }
                 let mut state = self.state.lock().await;
                 state.conversation = arg.to_string();
@@ -1858,24 +1941,29 @@ impl ClawsHandler {
                     &state.backend,
                     state.model.as_deref(),
                     state.sandbox.as_deref(),
+                    Some(&state.destination.to_storage()),
                     state.push,
                 );
-                self.send_text(
+                drop(state);
+                self.send_to_state_destination(
                     ctx,
-                    msg,
-                    &format!("Switched to conversation: {}", state.conversation),
+                    &format!("Switched to conversation: {}", arg),
                 )
                 .await
             }
             "agent" => {
                 if arg.is_empty() {
                     return self
-                        .send_text(ctx, msg, "Usage: !agent <claude|codex|gemini>")
+                        .send_text_to_source(ctx, msg, "Usage: !agent <claude|codex|gemini>")
                         .await;
                 }
                 let Some(backend) = backend_from_name(arg) else {
                     return self
-                        .send_text(ctx, msg, "Unknown agent. Use: claude, codex, or gemini.")
+                        .send_text_to_source(
+                            ctx,
+                            msg,
+                            "Unknown agent. Use: claude, codex, or gemini.",
+                        )
                         .await;
                 };
                 let mut state = self.state.lock().await;
@@ -1885,18 +1973,19 @@ impl ClawsHandler {
                     &state.backend,
                     state.model.as_deref(),
                     state.sandbox.as_deref(),
+                    Some(&state.destination.to_storage()),
                     state.push,
                 );
-                self.send_text(
-                    ctx,
-                    msg,
-                    &format!("Switched to agent: {}", backend_name(&state.backend)),
-                )
-                .await
+                let backend_name = backend_name(&state.backend).to_string();
+                drop(state);
+                self.send_to_state_destination(ctx, &format!("Switched to agent: {backend_name}"))
+                    .await
             }
             "model" => {
                 if arg.is_empty() {
-                    return self.send_text(ctx, msg, "Usage: !model <name>").await;
+                    return self
+                        .send_text_to_source(ctx, msg, "Usage: !model <name>")
+                        .await;
                 }
                 let mut state = self.state.lock().await;
                 state.model = Some(arg.to_string());
@@ -1905,30 +1994,65 @@ impl ClawsHandler {
                     &state.backend,
                     state.model.as_deref(),
                     state.sandbox.as_deref(),
+                    Some(&state.destination.to_storage()),
                     state.push,
                 );
-                self.send_text(ctx, msg, &format!("Switched to model: {}", arg))
+                drop(state);
+                self.send_to_state_destination(ctx, &format!("Switched to model: {}", arg))
                     .await
+            }
+            "destination" => {
+                if arg.is_empty() {
+                    return self
+                        .send_text_to_source(ctx, msg, "Usage: !destination <channel_id|dm>")
+                        .await;
+                }
+                let Some(new_destination) = DiscordDestination::parse(arg) else {
+                    return self
+                        .send_text_to_source(ctx, msg, "Invalid destination. Use channel ID or dm.")
+                        .await;
+                };
+                let mut state = self.state.lock().await;
+                state.destination = new_destination.clone();
+                persist_dir_state(
+                    &state.conversation,
+                    &state.backend,
+                    state.model.as_deref(),
+                    state.sandbox.as_deref(),
+                    Some(&state.destination.to_storage()),
+                    state.push,
+                );
+                let destination_display = state.destination.display();
+                drop(state);
+                self.send_to_state_destination(
+                    ctx,
+                    &format!("Destination set to: {destination_display}"),
+                )
+                .await
             }
             "status" => {
                 let state = self.state.lock().await;
                 let dir = current_dir_key();
                 let status = format!(
-                    "bot: {}\ndirectory: {}\nconversation: {}\nagent: {}\nmodel: {}\nsandbox: {}",
+                    "bot: {}\ndirectory: {}\nconversation: {}\nagent: {}\nmodel: {}\nsandbox: {}\ndestination: {}",
                     state.bot_name,
                     dir,
                     state.conversation,
                     backend_name(&state.backend),
                     state.model.as_deref().unwrap_or("default"),
-                    state.sandbox.as_deref().unwrap_or("none")
+                    state.sandbox.as_deref().unwrap_or("none"),
+                    state.destination.display(),
                 );
-                self.send_text(ctx, msg, &status).await
+                drop(state);
+                self.send_to_state_destination(ctx, &status).await
             }
             "list" => {
                 let state = self.state.lock().await;
                 let names = conversation_names_sorted();
                 if names.is_empty() {
-                    return self.send_text(ctx, msg, "No conversations yet.").await;
+                    return self
+                        .send_to_state_destination(ctx, "No conversations yet.")
+                        .await;
                 }
                 let body = names
                     .into_iter()
@@ -1941,11 +2065,14 @@ impl ClawsHandler {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.send_text(ctx, msg, &body).await
+                drop(state);
+                self.send_to_state_destination(ctx, &body).await
             }
             "new" => {
                 if arg.is_empty() {
-                    return self.send_text(ctx, msg, "Usage: !new <conversation>").await;
+                    return self
+                        .send_text_to_source(ctx, msg, "Usage: !new <conversation>")
+                        .await;
                 }
                 let state_snapshot = self.state.lock().await.clone();
                 let conversation_name = arg.to_string();
@@ -1956,10 +2083,14 @@ impl ClawsHandler {
 
                 match result {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => return self.send_text(ctx, msg, &e).await,
+                    Ok(Err(e)) => return self.send_text_to_source(ctx, msg, &e).await,
                     Err(e) => {
                         return self
-                            .send_text(ctx, msg, &format!("Conversation creation failed: {e}"))
+                            .send_text_to_source(
+                                ctx,
+                                msg,
+                                &format!("Conversation creation failed: {e}"),
+                            )
                             .await;
                     }
                 }
@@ -1971,15 +2102,14 @@ impl ClawsHandler {
                     &state.backend,
                     state.model.as_deref(),
                     state.sandbox.as_deref(),
+                    Some(&state.destination.to_storage()),
                     state.push,
                 );
-                self.send_text(
+                let conversation_name = state.conversation.clone();
+                drop(state);
+                self.send_to_state_destination(
                     ctx,
-                    msg,
-                    &format!(
-                        "Created and switched to conversation: {}",
-                        state.conversation
-                    ),
+                    &format!("Created and switched to conversation: {conversation_name}"),
                 )
                 .await
             }
@@ -1989,13 +2119,16 @@ impl ClawsHandler {
                 let path = conversation_path(&conversation);
                 if !path.exists() {
                     return self
-                        .send_text(ctx, msg, "Conversation does not exist.")
+                        .send_text_to_source(ctx, msg, "Conversation does not exist.")
                         .await;
                 }
                 let content = fs::read_to_string(&path).unwrap_or_default();
                 if count_exchanges(&content) == 0 {
                     return self
-                        .send_text(ctx, msg, &format!("Nothing to compact in '{conversation}'"))
+                        .send_to_state_destination(
+                            ctx,
+                            &format!("Nothing to compact in '{conversation}'"),
+                        )
                         .await;
                 }
                 let conversation_for_msg = conversation.clone();
@@ -2007,21 +2140,20 @@ impl ClawsHandler {
                 .await;
                 if let Err(e) = compact_result {
                     return self
-                        .send_text(ctx, msg, &format!("Compaction failed: {e}"))
+                        .send_text_to_source(ctx, msg, &format!("Compaction failed: {e}"))
                         .await;
                 }
-                self.send_text(
+                self.send_to_state_destination(
                     ctx,
-                    msg,
                     &format!("Compacted conversation: {conversation_for_msg}"),
                 )
                 .await
             }
             _ => {
-                self.send_text(
+                self.send_text_to_source(
                     ctx,
                     msg,
-                    "Unknown command. Use: !switch, !agent, !model, !status, !list, !new, !compact",
+                    "Unknown command. Use: !switch, !agent, !model, !destination, !status, !list, !new, !compact",
                 )
                 .await
             }
@@ -2040,23 +2172,13 @@ async fn execute_cron_task(
     let backend = state_snapshot.backend;
     let model = state_snapshot.model;
     let sandbox = state_snapshot.sandbox;
+    let destination = state_snapshot.destination;
+    let allowed_users = state_snapshot.allowed_users;
     let push = state_snapshot.push;
-    let last_user_id = state_snapshot.last_user_id;
     let task_name = task.name.clone();
     let task_message = task.message.clone();
     let interval = task.interval.clone();
     let previous_next_run = task.next_run;
-
-    // Resolve user_id: task-level > last message sender
-    let resolved_user_id = task.user_id.clone().or(last_user_id);
-    let Some(user_id_str) = resolved_user_id else {
-        eprintln!(
-            "[cron] No user_id for task '{}' and no previous message sender. Skipping.",
-            task_name
-        );
-        complete_cron_task(&task_name, previous_next_run, interval.as_deref());
-        return;
-    };
 
     let send_result = tokio::task::spawn_blocking(move || {
         let (_, response_or_err, success) = cmd_send_inner(
@@ -2077,37 +2199,13 @@ async fn execute_cron_task(
     })
     .await;
 
-    let uid: u64 = match user_id_str.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            eprintln!(
-                "[cron] Invalid user_id '{}' for task '{}'.",
-                user_id_str, task_name
-            );
-            complete_cron_task(&task_name, previous_next_run, interval.as_deref());
-            return;
-        }
-    };
-
-    let dm_channel = match UserId::new(uid).create_dm_channel(&http).await {
-        Ok(ch) => ch,
-        Err(e) => {
-            eprintln!(
-                "[cron] Failed to open DM for user '{}' (task '{}'): {e}",
-                user_id_str, task_name
-            );
-            complete_cron_task(&task_name, previous_next_run, interval.as_deref());
-            return;
-        }
-    };
-
     match send_result {
         Ok(Ok(response)) => {
-            for chunk in split_for_discord(&response, 2000) {
-                if let Err(e) = dm_channel.say(&http, chunk).await {
-                    eprintln!("[cron] Failed to DM user for task '{}': {e}", task_name);
-                    break;
-                }
+            if let Err(e) =
+                ClawsHandler::send_to_destination(&http, &destination, &allowed_users, &response)
+                    .await
+            {
+                eprintln!("[cron] Failed to deliver task '{}' output: {e}", task_name);
             }
             complete_cron_task(&task_name, previous_next_run, interval.as_deref());
         }
@@ -2117,9 +2215,13 @@ async fn execute_cron_task(
                 task_name,
                 truncate_display(&err, 120)
             );
-            let _ = dm_channel
-                .say(&http, format!("Cron task '{task_name}' failed: {err}"))
-                .await;
+            let _ = ClawsHandler::send_to_destination(
+                &http,
+                &destination,
+                &allowed_users,
+                &format!("Cron task '{task_name}' failed: {err}"),
+            )
+            .await;
             complete_cron_task(&task_name, previous_next_run, interval.as_deref());
         }
         Err(err) => {
@@ -2191,15 +2293,8 @@ impl EventHandler for ClawsHandler {
             state.allowed_users.clone()
         };
         if !allowed_users.contains(&user_id) {
-            let _ = self.send_text(&ctx, &msg, "Access denied.").await;
+            let _ = self.send_text_to_source(&ctx, &msg, "Access denied.").await;
             return;
-        }
-
-        // Track last authorized sender for cron DM delivery (skip bot's own ID)
-        let bot_id = ctx.cache.current_user().id;
-        if msg.author.id != bot_id {
-            let mut state = self.state.lock().await;
-            state.last_user_id = Some(user_id.clone());
         }
 
         let content = strip_leading_mentions(&msg.content);
@@ -2244,16 +2339,16 @@ impl EventHandler for ClawsHandler {
 
         match result {
             Ok(Ok(response)) => {
-                let _ = self.send_text(&ctx, &msg, &response).await;
+                let _ = self.send_to_state_destination(&ctx, &response).await;
             }
             Ok(Err(err)) => {
                 let _ = self
-                    .send_text(&ctx, &msg, &format!("Command failed: {err}"))
+                    .send_to_state_destination(&ctx, &format!("Command failed: {err}"))
                     .await;
             }
             Err(err) => {
                 let _ = self
-                    .send_text(&ctx, &msg, &format!("Worker failed: {err}"))
+                    .send_to_state_destination(&ctx, &format!("Worker failed: {err}"))
                     .await;
             }
         }
@@ -2269,6 +2364,7 @@ fn cmd_claws(
     backend: Backend,
     model: Option<String>,
     sandbox: Option<String>,
+    destination: DiscordDestination,
     push: bool,
 ) {
     ensure_breo_dir();
@@ -2278,12 +2374,13 @@ fn cmd_claws(
         | GatewayIntents::MESSAGE_CONTENT;
 
     eprintln!(
-        "[claws] Bot: {} | Conversation: {} | Agent: {} | Model: {} | Sandbox: {}",
+        "[claws] Bot: {} | Conversation: {} | Agent: {} | Model: {} | Sandbox: {} | Destination: {}",
         bot_name,
         conversation,
         backend_name(&backend),
         model.as_deref().unwrap_or("default"),
-        sandbox.as_deref().unwrap_or("none")
+        sandbox.as_deref().unwrap_or("none"),
+        destination.display()
     );
     if let Some(id) = guild_id.as_deref() {
         eprintln!("[claws] Guild filter configured: {id}");
@@ -2304,10 +2401,10 @@ fn cmd_claws(
             backend,
             model,
             sandbox,
+            destination,
             push,
             allowed_users,
             cron_started: false,
-            last_user_id: None,
         }));
 
         let handler = ClawsHandler {
@@ -2404,6 +2501,7 @@ fn main() {
             &backend,
             resolved_model.as_deref(),
             sandbox,
+            dir_state.discord_destination.as_deref(),
             push,
         );
     };
@@ -2426,6 +2524,7 @@ fn main() {
                 model: claws_model,
                 sandbox: claws_sandbox,
                 guild_id: claws_guild_id,
+                destination: claws_destination,
             }),
         ) => {
             if bot == "list" {
@@ -2452,6 +2551,23 @@ fn main() {
             let claws_resolved_model = claws_model.or(resolved_model);
             let claws_sandbox_name = claws_sandbox.or(sandbox_name);
             let claws_guild = claws_guild_id.or(profile.guild_id);
+            let claws_destination = claws_destination
+                .as_deref()
+                .map(|value| {
+                    DiscordDestination::parse(value).unwrap_or_else(|| {
+                        eprintln!(
+                            "Invalid --destination value '{value}'. Use 'dm' or a Discord channel ID."
+                        );
+                        std::process::exit(1);
+                    })
+                })
+                .or_else(|| {
+                    dir_state
+                        .discord_destination
+                        .as_deref()
+                        .and_then(DiscordDestination::parse)
+                })
+                .unwrap_or(DiscordDestination::Dm);
 
             cmd_claws(
                 &profile.name,
@@ -2461,6 +2577,7 @@ fn main() {
                 claws_backend,
                 claws_resolved_model,
                 claws_sandbox_name,
+                claws_destination,
                 push,
             );
         }

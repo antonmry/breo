@@ -1,13 +1,12 @@
 # TODO
 
-- [ ] Claws: Discord channel per project
 - [ ] Claws: support loop command
-- [ ] Claws: help should show what text commands are available
-- [ ] Better track of progress?
+- [ ] Shell: better track of progress?
 - [ ] Specs: with Allium?
 - [ ] Specs: one crate per spec
 - [ ] Specs: TTS and STT
-- [ ] Paste images
+- [ ] Shell: paste images
+- [ ] Shell: send a notification via Discord with a flag (msg and loop)
 - [ ] Skills?
 - [ ] MCP? Other features?
 - [ ] Z behaviour to navigate conversations
@@ -22,3 +21,5 @@
 - [x] Claws
 - [x] Claws: support multiple bots
 - [x] Claws: support cron commands
+- [x] Claws: Discord channel per project
+- [x] Claws: help should show what text commands are available
