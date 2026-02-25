@@ -8,6 +8,7 @@
 - [ ] Shell: paste images
 - [ ] Shell: send a notification via Discord with a flag (msg and loop)
 - [ ] Shell: how to keep models updated?
+- [ ] Shell: install via Skill?
 - [ ] Skills?
 - [ ] MCP? Other features?
 - [ ] Z behaviour to navigate conversations
