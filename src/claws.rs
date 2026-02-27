@@ -112,9 +112,24 @@ pub(crate) struct DiscordBotState {
     pub(crate) model: Option<String>,
     pub(crate) sandbox: Option<String>,
     pub(crate) destination: DiscordDestination,
+    pub(crate) receive_all: bool,
     pub(crate) push: bool,
     pub(crate) allowed_users: Vec<String>,
     pub(crate) cron_started: bool,
+}
+
+impl DiscordBotState {
+    fn persist(&self) {
+        persist_dir_state(
+            &self.conversation,
+            &self.backend,
+            self.model.as_deref(),
+            self.sandbox.as_deref(),
+            Some(&self.destination.to_storage()),
+            Some(self.receive_all),
+            self.push,
+        );
+    }
 }
 
 /// Describes the planned effect of a bot command.
@@ -131,6 +146,8 @@ pub(crate) enum CommandAction {
         destination: DiscordDestination,
         response: String,
     },
+    /// Mutate state: toggle receive_all, persist, respond with message
+    SetReceiveAll { receive_all: bool, response: String },
     /// Read-only: respond with status/list text to state destination
     Respond(String),
     /// Async: create conversation, then switch to it
@@ -206,6 +223,25 @@ pub(crate) fn plan_command_action(
                 response: format!("Destination set to: {display}"),
             }
         }
+        "receive-all" => {
+            let new_val = match arg.trim().to_lowercase().as_str() {
+                "on" | "true" | "yes" | "1" => true,
+                "off" | "false" | "no" | "0" => false,
+                "" => !state.receive_all, // toggle
+                _ => {
+                    return CommandAction::ErrorToSource(
+                        "Usage: !receive-all [on|off] (omit to toggle)".into(),
+                    );
+                }
+            };
+            CommandAction::SetReceiveAll {
+                receive_all: new_val,
+                response: format!(
+                    "receive_all set to: {}",
+                    if new_val { "on" } else { "off" }
+                ),
+            }
+        }
         "status" => {
             let dir = current_dir_key();
             CommandAction::Respond(build_status_text(state, &dir))
@@ -257,20 +293,36 @@ pub(crate) fn format_list_body(names: &[String], active: &str) -> String {
 }
 
 /// Decides whether a Discord message should be processed by the bot.
+/// When `receive_all` is true, channel messages are accepted without @mention.
 pub(crate) fn should_process_message(
     is_bot: bool,
     is_dm: bool,
     is_mention: bool,
+    receive_all: bool,
     user_id: &str,
     allowed_users: &[String],
 ) -> bool {
     if is_bot {
         return false;
     }
-    if !is_dm && !is_mention {
+    if !is_dm && !is_mention && !receive_all {
         return false;
     }
     allowed_users.iter().any(|u| u == user_id)
+}
+
+/// Checks whether a message source matches the bot's configured destination.
+/// - `Dm` destination: only accept DMs (guild_id is None).
+/// - `Channel(id)` destination: only accept messages from that specific channel.
+pub(crate) fn matches_destination(
+    destination: &DiscordDestination,
+    is_dm: bool,
+    channel_id: &str,
+) -> bool {
+    match destination {
+        DiscordDestination::Dm => is_dm,
+        DiscordDestination::Channel(dest_id) => channel_id == dest_id,
+    }
 }
 
 /// Classifies the result of a spawn_blocking send operation for response formatting.
@@ -286,7 +338,7 @@ pub(crate) fn format_send_result(
 
 pub(crate) fn build_status_text(state: &DiscordBotState, dir: &str) -> String {
     format!(
-        "bot: {}\ndirectory: {}\nconversation: {}\nagent: {}\nmodel: {}\nsandbox: {}\ndestination: {}",
+        "bot: {}\ndirectory: {}\nconversation: {}\nagent: {}\nmodel: {}\nsandbox: {}\ndestination: {}\nreceive_all: {}",
         state.bot_name,
         dir,
         state.conversation,
@@ -294,6 +346,7 @@ pub(crate) fn build_status_text(state: &DiscordBotState, dir: &str) -> String {
         state.model.as_deref().unwrap_or("default"),
         state.sandbox.as_deref().unwrap_or("none"),
         state.destination.display(),
+        state.receive_all,
     )
 }
 
@@ -624,42 +677,21 @@ impl ClawsHandler {
                 let mut state = self.state.lock().await;
                 state.conversation = name;
                 set_active(&state.conversation);
-                persist_dir_state(
-                    &state.conversation,
-                    &state.backend,
-                    state.model.as_deref(),
-                    state.sandbox.as_deref(),
-                    Some(&state.destination.to_storage()),
-                    state.push,
-                );
+                state.persist();
                 drop(state);
                 self.send_to_state_destination(ctx, &response).await
             }
             CommandAction::SwitchAgent { backend, response } => {
                 let mut state = self.state.lock().await;
                 state.backend = backend;
-                persist_dir_state(
-                    &state.conversation,
-                    &state.backend,
-                    state.model.as_deref(),
-                    state.sandbox.as_deref(),
-                    Some(&state.destination.to_storage()),
-                    state.push,
-                );
+                state.persist();
                 drop(state);
                 self.send_to_state_destination(ctx, &response).await
             }
             CommandAction::SetModel { model, response } => {
                 let mut state = self.state.lock().await;
                 state.model = Some(model);
-                persist_dir_state(
-                    &state.conversation,
-                    &state.backend,
-                    state.model.as_deref(),
-                    state.sandbox.as_deref(),
-                    Some(&state.destination.to_storage()),
-                    state.push,
-                );
+                state.persist();
                 drop(state);
                 self.send_to_state_destination(ctx, &response).await
             }
@@ -669,14 +701,17 @@ impl ClawsHandler {
             } => {
                 let mut state = self.state.lock().await;
                 state.destination = destination;
-                persist_dir_state(
-                    &state.conversation,
-                    &state.backend,
-                    state.model.as_deref(),
-                    state.sandbox.as_deref(),
-                    Some(&state.destination.to_storage()),
-                    state.push,
-                );
+                state.persist();
+                drop(state);
+                self.send_to_state_destination(ctx, &response).await
+            }
+            CommandAction::SetReceiveAll {
+                receive_all,
+                response,
+            } => {
+                let mut state = self.state.lock().await;
+                state.receive_all = receive_all;
+                state.persist();
                 drop(state);
                 self.send_to_state_destination(ctx, &response).await
             }
@@ -705,14 +740,7 @@ impl ClawsHandler {
 
                 let mut state = self.state.lock().await;
                 state.conversation = name.clone();
-                persist_dir_state(
-                    &state.conversation,
-                    &state.backend,
-                    state.model.as_deref(),
-                    state.sandbox.as_deref(),
-                    Some(&state.destination.to_storage()),
-                    state.push,
-                );
+                state.persist();
                 drop(state);
                 self.send_to_state_destination(
                     ctx,
@@ -863,13 +891,30 @@ impl EventHandler for ClawsHandler {
     async fn message(&self, ctx: Context, msg: DiscordMessage) {
         let is_dm = msg.guild_id.is_none();
         let is_mention = msg.mentions_me(&ctx).await.unwrap_or(false);
-        let user_id = msg.author.id.get().to_string();
-        let allowed_users = {
-            let state = self.state.lock().await;
-            state.allowed_users.clone()
-        };
+        let msg_channel_id = msg.channel_id.get().to_string();
 
-        if !should_process_message(msg.author.bot, is_dm, is_mention, &user_id, &allowed_users) {
+        // Filter by destination first: silently ignore messages from non-matching sources
+        let (destination, allowed_users, receive_all) = {
+            let state = self.state.lock().await;
+            (
+                state.destination.clone(),
+                state.allowed_users.clone(),
+                state.receive_all,
+            )
+        };
+        if !matches_destination(&destination, is_dm, &msg_channel_id) {
+            return;
+        }
+
+        let user_id = msg.author.id.get().to_string();
+        if !should_process_message(
+            msg.author.bot,
+            is_dm,
+            is_mention,
+            receive_all,
+            &user_id,
+            &allowed_users,
+        ) {
             if !msg.author.bot && (is_dm || is_mention) {
                 let _ = self.send_text_to_source(&ctx, &msg, "Access denied.").await;
             }
@@ -938,6 +983,7 @@ pub(crate) fn cmd_claws(
     model: Option<String>,
     sandbox: Option<String>,
     destination: DiscordDestination,
+    receive_all: bool,
     push: bool,
 ) {
     ensure_breo_dir();
@@ -947,13 +993,14 @@ pub(crate) fn cmd_claws(
         | GatewayIntents::MESSAGE_CONTENT;
 
     eprintln!(
-        "[claws] Bot: {} | Conversation: {} | Agent: {} | Model: {} | Sandbox: {} | Destination: {}",
+        "[claws] Bot: {} | Conversation: {} | Agent: {} | Model: {} | Sandbox: {} | Destination: {} | Listen all: {}",
         bot_name,
         conversation,
         backend_name(&backend),
         model.as_deref().unwrap_or("default"),
         sandbox.as_deref().unwrap_or("none"),
-        destination.display()
+        destination.display(),
+        receive_all
     );
     if let Some(id) = guild_id.as_deref() {
         eprintln!("[claws] Guild filter configured: {id}");
@@ -975,6 +1022,7 @@ pub(crate) fn cmd_claws(
             model,
             sandbox,
             destination,
+            receive_all,
             push,
             allowed_users,
             cron_started: false,
@@ -1522,6 +1570,7 @@ next_run = "not-a-date"
             model: Some("opus".into()),
             sandbox: None,
             destination: DiscordDestination::Dm,
+            receive_all: false,
             push: false,
             allowed_users: vec!["1".into()],
             cron_started: false,
@@ -1562,6 +1611,7 @@ next_run = "not-a-date"
             model: Some("gemini-3-pro".into()),
             sandbox: Some("default".into()),
             destination: DiscordDestination::Channel("123456".into()),
+            receive_all: true,
             push: true,
             allowed_users: vec!["u1".into()],
             cron_started: false,
@@ -1574,6 +1624,7 @@ next_run = "not-a-date"
         assert!(text.contains("model: gemini-3-pro"));
         assert!(text.contains("sandbox: default"));
         assert!(text.contains("destination: channel 123456"));
+        assert!(text.contains("receive_all: true"));
     }
 
     #[test]
@@ -1585,6 +1636,7 @@ next_run = "not-a-date"
             model: None,
             sandbox: None,
             destination: DiscordDestination::Dm,
+            receive_all: false,
             push: false,
             allowed_users: vec![],
             cron_started: false,
@@ -1593,6 +1645,7 @@ next_run = "not-a-date"
         assert!(text.contains("model: default"));
         assert!(text.contains("sandbox: none"));
         assert!(text.contains("destination: dm"));
+        assert!(text.contains("receive_all: false"));
     }
 
     #[test]
@@ -1922,6 +1975,7 @@ next_run = "2026-02-24T09:00:00"
             model: Some("gpt-5".into()),
             sandbox: Some("vm1".into()),
             destination: DiscordDestination::Channel("456".into()),
+            receive_all: true,
             push: true,
             allowed_users: vec!["u1".into(), "u2".into()],
             cron_started: true,
@@ -1956,6 +2010,7 @@ next_run = "2026-02-24T09:00:00"
             model: None,
             sandbox: None,
             destination: DiscordDestination::Dm,
+            receive_all: false,
             push: false,
             allowed_users: vec!["1".into()],
             cron_started: false,
@@ -2220,6 +2275,7 @@ next_run = "2026-02-24T09:00:00"
             true,
             true,
             true,
+            false,
             "1",
             &["1".into()]
         ));
@@ -2228,6 +2284,7 @@ next_run = "2026-02-24T09:00:00"
     #[test]
     fn should_process_non_dm_non_mention_rejected() {
         assert!(!should_process_message(
+            false,
             false,
             false,
             false,
@@ -2242,6 +2299,7 @@ next_run = "2026-02-24T09:00:00"
             false,
             true,
             false,
+            false,
             "1",
             &["1".into()]
         ));
@@ -2253,6 +2311,7 @@ next_run = "2026-02-24T09:00:00"
             false,
             false,
             true,
+            false,
             "1",
             &["1".into()]
         ));
@@ -2263,6 +2322,7 @@ next_run = "2026-02-24T09:00:00"
         assert!(!should_process_message(
             false,
             true,
+            false,
             false,
             "2",
             &["1".into()]
@@ -2275,6 +2335,7 @@ next_run = "2026-02-24T09:00:00"
             false,
             true,
             false,
+            false,
             "3",
             &["1".into(), "2".into(), "3".into()]
         ));
@@ -2282,7 +2343,46 @@ next_run = "2026-02-24T09:00:00"
 
     #[test]
     fn should_process_empty_allowed_rejected() {
-        assert!(!should_process_message(false, true, true, "1", &[]));
+        assert!(!should_process_message(false, true, true, false, "1", &[]));
+    }
+
+    #[test]
+    fn should_process_receive_all_channel_message_accepted() {
+        // receive_all=true: channel message without mention should be accepted
+        assert!(should_process_message(
+            false,
+            false,
+            false,
+            true,
+            "1",
+            &["1".into()]
+        ));
+    }
+
+    #[test]
+    fn should_process_receive_all_still_rejects_bots() {
+        // receive_all doesn't override bot rejection
+        assert!(!should_process_message(
+            true,
+            false,
+            false,
+            true,
+            "1",
+            &["1".into()]
+        ));
+    }
+
+    #[test]
+    fn should_process_receive_all_still_requires_auth() {
+        // receive_all doesn't bypass allowed_users check
+        assert!(!should_process_message(
+            false,
+            false,
+            false,
+            true,
+            "2",
+            &["1".into()]
+        ));
     }
 
     // --- format_send_result tests ---
@@ -2805,6 +2905,7 @@ interval = "1h"
             false,
             true,
             true,
+            false,
             "1",
             &["1".into()]
         ));
@@ -2817,8 +2918,62 @@ interval = "1h"
             true,
             true,
             true,
+            false,
             "1",
             &["1".into()]
+        ));
+    }
+
+    // --- matches_destination tests ---
+
+    #[test]
+    fn matches_destination_dm_accepts_dm() {
+        assert!(matches_destination(&DiscordDestination::Dm, true, "12345"));
+    }
+
+    #[test]
+    fn matches_destination_dm_rejects_channel() {
+        assert!(!matches_destination(
+            &DiscordDestination::Dm,
+            false,
+            "12345"
+        ));
+    }
+
+    #[test]
+    fn matches_destination_channel_accepts_matching() {
+        assert!(matches_destination(
+            &DiscordDestination::Channel("999".into()),
+            false,
+            "999"
+        ));
+    }
+
+    #[test]
+    fn matches_destination_channel_rejects_different() {
+        assert!(!matches_destination(
+            &DiscordDestination::Channel("999".into()),
+            false,
+            "888"
+        ));
+    }
+
+    #[test]
+    fn matches_destination_channel_accepts_matching_even_if_dm_flag() {
+        // Channel destination matches by channel_id, regardless of is_dm flag
+        assert!(matches_destination(
+            &DiscordDestination::Channel("999".into()),
+            true,
+            "999"
+        ));
+    }
+
+    #[test]
+    fn matches_destination_channel_rejects_dm_with_different_id() {
+        assert!(!matches_destination(
+            &DiscordDestination::Channel("999".into()),
+            true,
+            "111"
         ));
     }
 

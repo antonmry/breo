@@ -104,7 +104,8 @@ Start the Discord bot bridge for the current directory.
 
 The bot responds to DMs and @mentions in channels. Messages are routed
 through the same LLM backend as `breo send`, with full conversation
-persistence.
+persistence. Use --listen-all to process all messages in the destination
+channel without requiring @mentions.
 
 Bot commands (send as a Discord message):
   !switch <name>    Switch to a different conversation
@@ -114,6 +115,7 @@ Bot commands (send as a Discord message):
   !agent <backend>  Change the LLM backend (claude, codex, gemini, ...)
   !model <name>     Change the model
   !destination <channel_id|dm>  Change where responses are delivered
+  !receive-all [on|off]  Toggle receiving all messages in channel (omit arg to toggle)
   !compact           Summarize the current conversation to save context
 
 Scheduling:
@@ -143,6 +145,10 @@ Configuration:
 
         #[arg(short = 'd', long)]
         destination: Option<String>,
+
+        /// Receive all messages in the destination channel (not just @mentions)
+        #[arg(long)]
+        receive_all: bool,
     },
 }
 
@@ -275,6 +281,7 @@ fn main() {
             resolved_model.as_deref(),
             sandbox,
             dir_state.discord_destination.as_deref(),
+            dir_state.receive_all,
             push,
         );
     };
@@ -298,6 +305,7 @@ fn main() {
                 sandbox: claws_sandbox,
                 guild_id: claws_guild_id,
                 destination: claws_destination,
+                receive_all,
             }),
         ) => {
             if bot == "list" {
@@ -321,6 +329,11 @@ fn main() {
                 claws_destination.as_deref(),
                 dir_state.discord_destination.as_deref(),
             );
+            let claws_receive_all = if receive_all {
+                true
+            } else {
+                dir_state.receive_all.unwrap_or(false)
+            };
 
             cmd_claws(
                 &profile.name,
@@ -331,6 +344,7 @@ fn main() {
                 claws_resolved_model,
                 claws_sandbox_name,
                 claws_destination,
+                claws_receive_all,
                 push,
             );
         }
@@ -751,6 +765,17 @@ mod tests {
     }
 
     #[test]
+    fn cli_parse_claws_with_receive_all() {
+        let cli = Cli::try_parse_from(["breo", "claws", "mybot", "--receive-all"]).expect("parse");
+        match cli.command {
+            Some(Commands::Claws { receive_all, .. }) => {
+                assert!(receive_all);
+            }
+            _ => panic!("expected Claws"),
+        }
+    }
+
+    #[test]
     fn cli_parse_rename_fields() {
         let cli = Cli::try_parse_from(["breo", "rename", "old-conv", "new-conv"]).expect("parse");
         match cli.command {
@@ -1162,6 +1187,7 @@ mod tests {
                 sandbox,
                 guild_id,
                 destination,
+                receive_all,
             }) => {
                 assert_eq!(bot, "minimal-bot");
                 assert!(agent.is_none());
@@ -1169,6 +1195,7 @@ mod tests {
                 assert!(sandbox.is_none());
                 assert!(guild_id.is_none());
                 assert!(destination.is_none());
+                assert!(!receive_all);
             }
             _ => panic!("expected Claws"),
         }

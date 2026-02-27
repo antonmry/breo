@@ -162,6 +162,7 @@ pub(crate) struct DirState {
     pub(crate) model: Option<String>,
     pub(crate) sandbox: Option<String>,
     pub(crate) discord_destination: Option<String>,
+    pub(crate) receive_all: Option<bool>,
     pub(crate) dir_id: Option<String>,
 }
 
@@ -253,6 +254,7 @@ pub(crate) fn cmd_status() {
         .discord_destination
         .as_deref()
         .unwrap_or("(default dm)");
+    let receive_all = state.receive_all.unwrap_or(false);
     println!("directory:    {}", current_dir_key());
     println!(
         "config:       {}",
@@ -267,6 +269,7 @@ pub(crate) fn cmd_status() {
     println!("model:        {model}");
     println!("sandbox:      {sandbox}");
     println!("destination:  {destination}");
+    println!("receive_all:  {receive_all}");
 }
 
 pub(crate) fn cmd_setup(shell: &ShellType) {
@@ -352,6 +355,7 @@ pub(crate) fn persist_dir_state(
     model: Option<&str>,
     sandbox: Option<&str>,
     discord_destination: Option<&str>,
+    receive_all: Option<bool>,
     push: bool,
 ) {
     let mut state = load_dir_state();
@@ -360,6 +364,7 @@ pub(crate) fn persist_dir_state(
     state.model = model.map(ToString::to_string);
     state.sandbox = sandbox.map(ToString::to_string);
     state.discord_destination = discord_destination.map(ToString::to_string);
+    state.receive_all = receive_all;
     save_dir_state(&state);
     crate::conversation::git_commit_state(push);
 }
@@ -507,6 +512,7 @@ mod tests {
             model: Some("opus".into()),
             sandbox: Some("default".into()),
             discord_destination: Some("dm".into()),
+            receive_all: Some(true),
             dir_id: Some("id".into()),
         };
         let t = toml::to_string(&s).expect("serialize");
@@ -767,6 +773,7 @@ allowed_users = ["user1"]
                 Some("opus"),
                 Some("vm"),
                 Some("dm"),
+                Some(true),
                 false,
             );
         });
@@ -1046,12 +1053,14 @@ token = "aliased-bot-tok"
                 Some("opus"),
                 Some("vm1"),
                 Some("dm"),
+                Some(true),
                 true,
             );
             let state = load_dir_state();
             assert_eq!(state.agent.as_deref(), Some("gemini"));
             assert_eq!(state.model.as_deref(), Some("opus"));
             assert_eq!(state.sandbox.as_deref(), Some("vm1"));
+            assert_eq!(state.receive_all, Some(true));
             assert_eq!(state.discord_destination.as_deref(), Some("dm"));
         });
     }
