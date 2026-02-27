@@ -24,7 +24,6 @@ pub(crate) enum ShellType {
 pub(crate) struct Config {
     pub(crate) sandbox: bool,
     pub(crate) sandbox_name: String,
-    pub(crate) push: bool,
     pub(crate) agent: String,
     pub(crate) discord_token: Option<String>,
     pub(crate) discord_guild_id: Option<String>,
@@ -64,7 +63,6 @@ impl Default for Config {
         Self {
             sandbox: true,
             sandbox_name: "default".into(),
-            push: true,
             agent: "claude".into(),
             discord_token: None,
             discord_guild_id: None,
@@ -356,7 +354,6 @@ pub(crate) fn persist_dir_state(
     sandbox: Option<&str>,
     discord_destination: Option<&str>,
     receive_all: Option<bool>,
-    push: bool,
 ) {
     let mut state = load_dir_state();
     state.conversation = Some(conversation.to_string());
@@ -366,7 +363,7 @@ pub(crate) fn persist_dir_state(
     state.discord_destination = discord_destination.map(ToString::to_string);
     state.receive_all = receive_all;
     save_dir_state(&state);
-    crate::conversation::git_commit_state(push);
+    crate::conversation::git_commit_state();
 }
 
 #[cfg(test)]
@@ -404,7 +401,6 @@ mod tests {
         let c = Config::default();
         assert!(c.sandbox);
         assert_eq!(c.sandbox_name, "default");
-        assert!(c.push);
         assert_eq!(c.agent, "claude");
     }
 
@@ -605,7 +601,6 @@ mod tests {
         let toml_str = r#"
 sandbox = false
 sandbox_name = "test"
-push = false
 agent = "gemini"
 discord_token = "tok123"
 discord_guild_id = "guild1"
@@ -614,7 +609,6 @@ discord_allowed_users = ["u1", "u2"]
         let c: Config = toml::from_str(toml_str).expect("parse");
         assert!(!c.sandbox);
         assert_eq!(c.sandbox_name, "test");
-        assert!(!c.push);
         assert_eq!(c.agent, "gemini");
         assert_eq!(c.discord_token.as_deref(), Some("tok123"));
         assert_eq!(c.discord_guild_id.as_deref(), Some("guild1"));
@@ -774,7 +768,6 @@ allowed_users = ["user1"]
                 Some("vm"),
                 Some("dm"),
                 Some(true),
-                false,
             );
         });
     }
@@ -818,7 +811,6 @@ allowed_users = ["user1"]
         assert_eq!(c.agent, "codex");
         // Other fields should be defaults
         assert!(c.sandbox);
-        assert!(c.push);
         assert_eq!(c.sandbox_name, "default");
     }
 
@@ -905,7 +897,6 @@ token = "aliased-bot-tok"
         let c = Config::default();
         assert!(c.sandbox);
         assert_eq!(c.sandbox_name, "default");
-        assert!(c.push);
         assert_eq!(c.agent, "claude");
         assert!(c.discord_token.is_none());
         assert!(c.discord_guild_id.is_none());
@@ -1054,7 +1045,6 @@ token = "aliased-bot-tok"
                 Some("vm1"),
                 Some("dm"),
                 Some(true),
-                true,
             );
             let state = load_dir_state();
             assert_eq!(state.agent.as_deref(), Some("gemini"));

@@ -160,7 +160,6 @@ pub(crate) fn cmd_loop(
     review_backend: &Backend,
     files: &[PathBuf],
     sandbox: Option<&str>,
-    push: bool,
 ) -> String {
     if let Err(msg) = validate_loop_files(plan_path, verification_path) {
         eprintln!("{msg}");
@@ -184,7 +183,7 @@ pub(crate) fn cmd_loop(
 
     eprintln!("[loop] === Attempt 1 ===");
     let first_message = build_first_message(plan_path, &file_refs);
-    let name = cmd_send(&first_message, target, model, backend, &[], sandbox, push);
+    let name = cmd_send(&first_message, target, model, backend, &[], sandbox);
 
     let mut iteration = 1;
     loop {
@@ -199,7 +198,6 @@ pub(crate) fn cmd_loop(
             review_backend,
             &[],
             sandbox,
-            push,
             false,
         );
 
@@ -230,15 +228,7 @@ pub(crate) fn cmd_loop(
                 let retry_message = build_retry_message(plan_path);
 
                 eprintln!("\n[loop] === Attempt {iteration} ===");
-                cmd_send(
-                    &retry_message,
-                    Some(&name),
-                    model,
-                    backend,
-                    &[],
-                    sandbox,
-                    push,
-                );
+                cmd_send(&retry_message, Some(&name), model, backend, &[], sandbox);
             }
         }
     }

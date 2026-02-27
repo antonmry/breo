@@ -44,8 +44,7 @@ pub(crate) fn ensure_breo_dir() {
 
     let config_path = base.join("config.toml");
     if !config_path.exists() {
-        let default_config =
-            "sandbox = true\nsandbox_name = \"default\"\npush = true\nagent = \"claude\"\n";
+        let default_config = "sandbox = true\nsandbox_name = \"default\"\nagent = \"claude\"\n";
         let _ = fs::write(&config_path, default_config);
     }
 }
@@ -262,7 +261,7 @@ pub(crate) fn print_context_summary(
     );
 }
 
-pub(crate) fn create_conversation(name: &str, push: bool) -> Result<(), String> {
+pub(crate) fn create_conversation(name: &str) -> Result<(), String> {
     ensure_breo_dir();
     let path = conversation_path(name);
     if path.exists() {
@@ -273,13 +272,13 @@ pub(crate) fn create_conversation(name: &str, push: bool) -> Result<(), String> 
         return Err(format!("Failed to create {}: {e}", path.display()));
     }
     set_active(name);
-    git_commit_conversation(&path, &format!("breo: new conversation '{name}'"), push);
-    git_commit_state(push);
+    git_commit_conversation(&path, &format!("breo: new conversation '{name}'"));
+    git_commit_state();
     Ok(())
 }
 
-pub(crate) fn cmd_new(name: &str, push: bool) {
-    if let Err(e) = create_conversation(name, push) {
+pub(crate) fn cmd_new(name: &str) {
+    if let Err(e) = create_conversation(name) {
         eprintln!("{e}");
         std::process::exit(1);
     }
@@ -303,7 +302,7 @@ pub(crate) fn validate_rename(
     Ok(active == old_name)
 }
 
-pub(crate) fn cmd_rename(old_name: &str, new_name: &str, push: bool) {
+pub(crate) fn cmd_rename(old_name: &str, new_name: &str) {
     let old_path = conversation_path(old_name);
     let new_path = conversation_path(new_name);
     let active = get_active();
@@ -336,9 +335,8 @@ pub(crate) fn cmd_rename(old_name: &str, new_name: &str, push: bool) {
             git_commit_conversation(
                 &new_path,
                 &format!("breo: rename '{old_name}' -> '{new_name}'"),
-                push,
             );
-            git_commit_state(push);
+            git_commit_state();
 
             println!("Renamed conversation: {old_name} -> {new_name}");
         }
@@ -466,7 +464,7 @@ pub(crate) fn read_attached_files(files: &[PathBuf]) -> String {
     attachments
 }
 
-pub(crate) fn git_commit_conversation(_path: &Path, message: &str, push: bool) {
+pub(crate) fn git_commit_conversation(_path: &Path, message: &str) {
     let base = breo_dir();
     let status = Command::new("git")
         .arg("add")
@@ -477,28 +475,18 @@ pub(crate) fn git_commit_conversation(_path: &Path, message: &str, push: bool) {
     if let Ok(s) = status
         && s.success()
     {
-        let committed = Command::new("git")
+        let _ = Command::new("git")
             .arg("commit")
             .arg("-m")
             .arg(message)
             .current_dir(&base)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-
-        if push && committed {
-            let _ = Command::new("git")
-                .arg("push")
-                .current_dir(&base)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-        }
+            .status();
     }
 }
 
-pub(crate) fn git_commit_state(push: bool) {
+pub(crate) fn git_commit_state() {
     let base = breo_dir();
     let path = crate::config::state_file_path();
     let status = Command::new("git")
@@ -509,23 +497,45 @@ pub(crate) fn git_commit_state(push: bool) {
     if let Ok(s) = status
         && s.success()
     {
-        let committed = Command::new("git")
+        let _ = Command::new("git")
             .arg("commit")
             .arg("-m")
             .arg("breo: update state")
             .current_dir(&base)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
+            .status();
+    }
+}
 
-        if push && committed {
-            let _ = Command::new("git")
-                .arg("push")
-                .current_dir(&base)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+pub(crate) fn git_push() {
+    let base = breo_dir();
+    let status = Command::new("git").arg("push").current_dir(&base).status();
+    match status {
+        Ok(s) if s.success() => println!("Pushed successfully."),
+        Ok(s) => {
+            eprintln!("git push exited with status {s}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Failed to run git push: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub(crate) fn git_pull() {
+    let base = breo_dir();
+    let status = Command::new("git").arg("pull").current_dir(&base).status();
+    match status {
+        Ok(s) if s.success() => println!("Pulled successfully."),
+        Ok(s) => {
+            eprintln!("git pull exited with status {s}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Failed to run git pull: {e}");
+            std::process::exit(1);
         }
     }
 }
@@ -592,7 +602,7 @@ pub(crate) fn failure_label(sandboxed: bool, backend: &Backend) -> &'static str 
     }
 }
 
-pub(crate) fn cmd_compact(name: Option<&str>, sandbox: Option<&str>, push: bool) {
+pub(crate) fn cmd_compact(name: Option<&str>, sandbox: Option<&str>) {
     let active = get_active();
     let name = name.unwrap_or(&active);
     let path = conversation_path(name);
@@ -643,7 +653,7 @@ pub(crate) fn cmd_compact(name: Option<&str>, sandbox: Option<&str>, push: bool)
         std::process::exit(1);
     }
 
-    git_commit_conversation(&path, &format!("breo: compact '{name}'"), push);
+    git_commit_conversation(&path, &format!("breo: compact '{name}'"));
 
     let tokens_after = estimate_tokens(&compacted);
     eprintln!(
@@ -676,7 +686,6 @@ pub(crate) fn compact_stats(
     (pct_saved, remaining)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_send_inner(
     message: &str,
     target: Option<&str>,
@@ -684,7 +693,6 @@ pub(crate) fn cmd_send_inner(
     backend: &Backend,
     files: &[PathBuf],
     sandbox: Option<&str>,
-    push: bool,
     stream: bool,
 ) -> (String, String, bool) {
     ensure_breo_dir();
@@ -722,7 +730,7 @@ pub(crate) fn cmd_send_inner(
         std::process::exit(1);
     }
 
-    git_commit_conversation(&path, &format!("breo: message to '{name}'"), push);
+    git_commit_conversation(&path, &format!("breo: message to '{name}'"));
 
     print_context_summary(&content, name, model, backend, &path);
 
@@ -736,10 +744,9 @@ pub(crate) fn cmd_send(
     backend: &Backend,
     files: &[PathBuf],
     sandbox: Option<&str>,
-    push: bool,
 ) -> String {
     let (name, stderr, success) =
-        cmd_send_inner(message, target, model, backend, files, sandbox, push, true);
+        cmd_send_inner(message, target, model, backend, files, sandbox, true);
     if !success {
         let label = if sandbox.is_some() {
             "limactl"
@@ -1073,7 +1080,7 @@ mod tests {
                     .expect("unix epoch")
                     .as_nanos()
             );
-            let result = create_conversation(&name, false);
+            let result = create_conversation(&name);
             assert!(result.is_ok(), "{result:?}");
             let path = conversation_path(&name);
             assert!(path.exists());
@@ -1095,9 +1102,9 @@ mod tests {
                     .expect("unix epoch")
                     .as_nanos()
             );
-            let result1 = create_conversation(&name, false);
+            let result1 = create_conversation(&name);
             assert!(result1.is_ok(), "{result1:?}");
-            let result2 = create_conversation(&name, false);
+            let result2 = create_conversation(&name);
             assert!(result2.is_err());
             let _ = fs::remove_file(conversation_path(&name));
         });
@@ -1232,7 +1239,7 @@ mod tests {
         let path = tmp.path().join("test.md");
         fs::write(&path, "test").expect("write");
         // Should not panic even outside a git repo
-        git_commit_conversation(&path, "test commit", false);
+        git_commit_conversation(&path, "test commit");
     }
 
     #[test]
@@ -1240,7 +1247,7 @@ mod tests {
     fn git_commit_state_does_not_panic() {
         with_temp_home(|| {
             ensure_breo_dir();
-            git_commit_state(false);
+            git_commit_state();
         });
     }
 
@@ -1360,7 +1367,7 @@ mod tests {
                     .expect("unix epoch")
                     .as_nanos()
             );
-            let result = create_conversation(&name, false);
+            let result = create_conversation(&name);
             assert!(result.is_ok(), "{result:?}");
 
             let names = conversation_names_sorted();
@@ -1850,7 +1857,7 @@ mod tests {
         with_temp_home(|| {
             ensure_breo_dir();
             let name = format!("active-test-{}", std::process::id());
-            create_conversation(&name, false).expect("create");
+            create_conversation(&name).expect("create");
             let active = get_active();
             assert_eq!(active, name);
             let _ = fs::remove_file(conversation_path(&name));
@@ -1863,7 +1870,7 @@ mod tests {
         with_temp_home(|| {
             ensure_breo_dir();
             let name = format!("header-test-{}", std::process::id());
-            create_conversation(&name, false).expect("create");
+            create_conversation(&name).expect("create");
             let content = fs::read_to_string(conversation_path(&name)).expect("read");
             assert!(content.starts_with("# Conversation:"));
             assert!(content.contains(&name));
@@ -1935,7 +1942,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("test.md");
         fs::write(&path, "content").expect("write");
-        git_commit_conversation(&path, "commit msg", false);
+        git_commit_conversation(&path, "commit msg");
     }
 
     #[test]
@@ -1943,7 +1950,7 @@ mod tests {
     fn git_commit_state_no_panic_with_push_false() {
         with_temp_home(|| {
             ensure_breo_dir();
-            git_commit_state(false);
+            git_commit_state();
         });
     }
 
@@ -1967,8 +1974,8 @@ mod tests {
             ensure_breo_dir();
             let n1 = format!("z-test-{}", std::process::id());
             let n2 = format!("a-test-{}", std::process::id());
-            create_conversation(&n1, false).expect("create1");
-            create_conversation(&n2, false).expect("create2");
+            create_conversation(&n1).expect("create1");
+            create_conversation(&n2).expect("create2");
             let names = conversation_names_sorted();
             assert!(names.contains(&n1));
             assert!(names.contains(&n2));

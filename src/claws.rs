@@ -113,7 +113,6 @@ pub(crate) struct DiscordBotState {
     pub(crate) sandbox: Option<String>,
     pub(crate) destination: DiscordDestination,
     pub(crate) receive_all: bool,
-    pub(crate) push: bool,
     pub(crate) allowed_users: Vec<String>,
     pub(crate) cron_started: bool,
 }
@@ -127,7 +126,6 @@ impl DiscordBotState {
             self.sandbox.as_deref(),
             Some(&self.destination.to_storage()),
             Some(self.receive_all),
-            self.push,
         );
     }
 }
@@ -717,12 +715,10 @@ impl ClawsHandler {
             }
             CommandAction::Respond(text) => self.send_to_state_destination(ctx, &text).await,
             CommandAction::CreateConversation(name) => {
-                let state_snapshot = self.state.lock().await.clone();
                 let conversation_name = name.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    create_conversation(&conversation_name, state_snapshot.push)
-                })
-                .await;
+                let result =
+                    tokio::task::spawn_blocking(move || create_conversation(&conversation_name))
+                        .await;
 
                 match result {
                     Ok(Ok(())) => {}
@@ -752,9 +748,8 @@ impl ClawsHandler {
                 let state = self.state.lock().await.clone();
                 let conversation_for_msg = conversation.clone();
                 let sandbox = state.sandbox.clone();
-                let push = state.push;
                 let compact_result = tokio::task::spawn_blocking(move || {
-                    cmd_compact(Some(&conversation), sandbox.as_deref(), push);
+                    cmd_compact(Some(&conversation), sandbox.as_deref());
                 })
                 .await;
                 if let Err(e) = compact_result {
@@ -786,7 +781,6 @@ pub(crate) async fn execute_cron_task(
     let sandbox = state_snapshot.sandbox;
     let destination = state_snapshot.destination;
     let allowed_users = state_snapshot.allowed_users;
-    let push = state_snapshot.push;
     let task_name = task.name.clone();
     let task_message = task.message.clone();
     let interval = task.interval.clone();
@@ -800,7 +794,6 @@ pub(crate) async fn execute_cron_task(
             &backend,
             &[],
             sandbox.as_deref(),
-            push,
             false,
         );
         if success {
@@ -939,7 +932,6 @@ impl EventHandler for ClawsHandler {
         let backend = state.backend.clone();
         let model = state.model.clone();
         let sandbox = state.sandbox.clone();
-        let push = state.push;
         let message = content.clone();
 
         let result = tokio::task::spawn_blocking(move || {
@@ -950,7 +942,6 @@ impl EventHandler for ClawsHandler {
                 &backend,
                 &[],
                 sandbox.as_deref(),
-                push,
                 false,
             );
             if success {
@@ -984,7 +975,6 @@ pub(crate) fn cmd_claws(
     sandbox: Option<String>,
     destination: DiscordDestination,
     receive_all: bool,
-    push: bool,
 ) {
     ensure_breo_dir();
     let conversation = get_active();
@@ -1023,7 +1013,6 @@ pub(crate) fn cmd_claws(
             sandbox,
             destination,
             receive_all,
-            push,
             allowed_users,
             cron_started: false,
         }));
@@ -1571,7 +1560,6 @@ next_run = "not-a-date"
             sandbox: None,
             destination: DiscordDestination::Dm,
             receive_all: false,
-            push: false,
             allowed_users: vec!["1".into()],
             cron_started: false,
         };
@@ -1612,7 +1600,6 @@ next_run = "not-a-date"
             sandbox: Some("default".into()),
             destination: DiscordDestination::Channel("123456".into()),
             receive_all: true,
-            push: true,
             allowed_users: vec!["u1".into()],
             cron_started: false,
         };
@@ -1637,7 +1624,6 @@ next_run = "not-a-date"
             sandbox: None,
             destination: DiscordDestination::Dm,
             receive_all: false,
-            push: false,
             allowed_users: vec![],
             cron_started: false,
         };
@@ -1976,7 +1962,6 @@ next_run = "2026-02-24T09:00:00"
             sandbox: Some("vm1".into()),
             destination: DiscordDestination::Channel("456".into()),
             receive_all: true,
-            push: true,
             allowed_users: vec!["u1".into(), "u2".into()],
             cron_started: true,
         };
@@ -1984,7 +1969,6 @@ next_run = "2026-02-24T09:00:00"
         assert_eq!(state.conversation, "conv-1");
         assert_eq!(state.model.as_deref(), Some("gpt-5"));
         assert_eq!(state.sandbox.as_deref(), Some("vm1"));
-        assert!(state.push);
         assert_eq!(state.allowed_users.len(), 2);
         assert!(state.cron_started);
     }
@@ -2011,7 +1995,6 @@ next_run = "2026-02-24T09:00:00"
             sandbox: None,
             destination: DiscordDestination::Dm,
             receive_all: false,
-            push: false,
             allowed_users: vec!["1".into()],
             cron_started: false,
         }

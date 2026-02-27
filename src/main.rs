@@ -15,7 +15,9 @@ use crate::config::{
     Backend, ShellType, cmd_setup, cmd_status, list_conversations, list_discord_bots, list_models,
     load_config, load_dir_state, persist_dir_state,
 };
-use crate::conversation::{cmd_compact, cmd_list, cmd_new, cmd_pick, cmd_rename, cmd_send};
+use crate::conversation::{
+    cmd_compact, cmd_list, cmd_new, cmd_pick, cmd_rename, cmd_send, git_pull, git_push,
+};
 use crate::loop_cmd::cmd_loop;
 
 #[derive(Parser)]
@@ -46,11 +48,16 @@ struct Cli {
     #[arg(long)]
     no_sandbox: bool,
 
-    #[arg(long)]
-    no_push: bool,
-
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum GitAction {
+    /// Push conversations to the remote repository
+    Push,
+    /// Pull conversations from the remote repository
+    Pull,
 }
 
 #[derive(Subcommand)]
@@ -98,6 +105,11 @@ enum Commands {
 
         #[arg(long)]
         no_sandbox: bool,
+    },
+    /// Sync conversations with a remote git repository
+    Git {
+        #[command(subcommand)]
+        action: GitAction,
     },
     #[command(long_about = "\
 Start the Discord bot bridge for the current directory.
@@ -173,10 +185,6 @@ fn resolve_backend(
         "gemini" => Backend::Gemini,
         _ => Backend::Claude,
     }
-}
-
-fn resolve_push(no_push: bool, config_push: bool) -> bool {
-    if no_push { false } else { config_push }
 }
 
 fn resolve_model(cli_model: Option<String>, dir_state_model: Option<String>) -> Option<String> {
@@ -270,8 +278,6 @@ fn main() {
     );
     let sandbox = sandbox_name.as_deref();
 
-    let push = resolve_push(cli.no_push, config.push);
-
     let resolved_model: Option<String> = resolve_model(cli.model.clone(), dir_state.model.clone());
 
     let save_after_send = |conversation: &str| {
@@ -282,20 +288,21 @@ fn main() {
             sandbox,
             dir_state.discord_destination.as_deref(),
             dir_state.receive_all,
-            push,
         );
     };
 
     match (cli.message, cli.command) {
-        (_, Some(Commands::New { name })) => cmd_new(&name, push),
-        (_, Some(Commands::Rename { old_name, new_name })) => {
-            cmd_rename(&old_name, &new_name, push)
-        }
+        (_, Some(Commands::New { name })) => cmd_new(&name),
+        (_, Some(Commands::Rename { old_name, new_name })) => cmd_rename(&old_name, &new_name),
         (_, Some(Commands::List)) => cmd_list(),
         (_, Some(Commands::Pick)) => cmd_pick(),
         (_, Some(Commands::Status)) => cmd_status(),
         (_, Some(Commands::Setup { shell })) => cmd_setup(&shell),
-        (_, Some(Commands::Compact { name })) => cmd_compact(name.as_deref(), sandbox, push),
+        (_, Some(Commands::Compact { name })) => cmd_compact(name.as_deref(), sandbox),
+        (_, Some(Commands::Git { action })) => match action {
+            GitAction::Push => git_push(),
+            GitAction::Pull => git_pull(),
+        },
         (
             _,
             Some(Commands::Claws {
@@ -345,7 +352,6 @@ fn main() {
                 claws_sandbox_name,
                 claws_destination,
                 claws_receive_all,
-                push,
             );
         }
         (
@@ -381,7 +387,6 @@ fn main() {
                 &review_be,
                 &files,
                 loop_sandbox_ref,
-                push,
             );
             save_after_send(&name);
         }
@@ -393,7 +398,6 @@ fn main() {
                 &backend,
                 &cli.files,
                 sandbox,
-                push,
             );
             save_after_send(&name);
         }
@@ -410,7 +414,6 @@ fn main() {
                         &backend,
                         &cli.files,
                         sandbox,
-                        push,
                     );
                     save_after_send(&name);
                     return;
@@ -542,12 +545,6 @@ mod tests {
     fn cli_parse_with_no_sandbox() {
         let cli = Cli::try_parse_from(["breo", "--no-sandbox", "msg"]).expect("parse");
         assert!(cli.no_sandbox);
-    }
-
-    #[test]
-    fn cli_parse_with_no_push() {
-        let cli = Cli::try_parse_from(["breo", "--no-push", "msg"]).expect("parse");
-        assert!(cli.no_push);
     }
 
     #[test]
@@ -813,18 +810,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_push_no_push_flag() {
-        assert!(!resolve_push(true, true));
-        assert!(!resolve_push(true, false));
-    }
-
-    #[test]
-    fn resolve_push_config_default() {
-        assert!(resolve_push(false, true));
-        assert!(!resolve_push(false, false));
-    }
-
-    #[test]
     fn resolve_model_cli_takes_priority() {
         let m = resolve_model(Some("opus".into()), Some("sonnet".into()));
         assert_eq!(m.as_deref(), Some("opus"));
@@ -1032,16 +1017,6 @@ mod tests {
         );
     }
 
-    // --- more resolve_push tests ---
-
-    #[test]
-    fn resolve_push_truth_table() {
-        assert!(!resolve_push(true, true));
-        assert!(!resolve_push(true, false));
-        assert!(resolve_push(false, true));
-        assert!(!resolve_push(false, false));
-    }
-
     // --- more resolve_model tests ---
 
     #[test]
@@ -1204,17 +1179,7 @@ mod tests {
     #[test]
     fn cli_parse_message_with_all_flags() {
         let cli = Cli::try_parse_from([
-            "breo",
-            "-c",
-            "my-conv",
-            "-m",
-            "opus",
-            "-a",
-            "claude",
-            "-s",
-            "vm1",
-            "--no-push",
-            "hello",
+            "breo", "-c", "my-conv", "-m", "opus", "-a", "claude", "-s", "vm1", "hello",
         ])
         .expect("parse");
         assert_eq!(cli.message.as_deref(), Some("hello"));
@@ -1222,6 +1187,27 @@ mod tests {
         assert_eq!(cli.model.as_deref(), Some("opus"));
         assert!(matches!(cli.agent, Some(Backend::Claude)));
         assert_eq!(cli.sandbox.as_deref(), Some("vm1"));
-        assert!(cli.no_push);
+    }
+
+    #[test]
+    fn cli_parse_git_push() {
+        let cli = Cli::try_parse_from(["breo", "git", "push"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Git {
+                action: GitAction::Push
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parse_git_pull() {
+        let cli = Cli::try_parse_from(["breo", "git", "pull"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Git {
+                action: GitAction::Pull
+            })
+        ));
     }
 }
