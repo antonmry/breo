@@ -63,9 +63,7 @@ external entity Model {
     context_window: Integer                          -- max tokens
 }
 
-config {
-    auto_push: Boolean = true
-}
+-- Git push/pull are manual operations (auto-push removed).
 
 
 -- ==========================================================================
@@ -253,9 +251,6 @@ rule CommitConversation {
         scope: conversations,
         message: "breo: " + message
     )
-    ensures:
-        if config.auto_push:
-            GitPush()
 }
 
 -- State changes (active conversation, agent, sandbox) are committed separately.
@@ -266,9 +261,22 @@ rule CommitState {
         scope: state,
         message: "breo: update state"
     )
-    ensures:
-        if config.auto_push:
-            GitPush()
+}
+
+-- Manual git push: `breo git push`.
+-- Pushes the breo data directory to the remote.
+rule GitPushManual {
+    when: GitPushManual()
+
+    ensures: GitPush(scope: breo_data_dir)
+}
+
+-- Manual git pull: `breo git pull`.
+-- Pulls the latest changes from the remote into the breo data directory.
+rule GitPullManual {
+    when: GitPullManual()
+
+    ensures: GitPull(scope: breo_data_dir)
 }
 
 
@@ -281,6 +289,7 @@ deferred sanitize                    -- Path sanitization: keep alphanumeric, da
 deferred hash                        -- Short hash for collision avoidance
 deferred timestamp_name              -- Generate timestamp-based name (YYYY-MM-DD_HH-MM-SS)
 deferred format_attachments          -- Format file attachments as markdown code blocks
+deferred breo_data_dir               -- ~/.local/share/breo (git-tracked data directory)
 
 
 -- ==========================================================================
@@ -293,3 +302,6 @@ deferred format_attachments          -- Format file attachments as markdown code
 --   Each backend injects its own system prompt; there is no way to measure it.
 -- Lazy migration from flat to scoped storage has been removed.
 --   All conversations use per-directory scoped folders.
+-- Auto-push has been removed. Git commits are still automatic after every mutation,
+--   but push/pull are now manual via `breo git push` and `breo git pull`.
+--   This avoids unexpected network operations and gives users control over sync timing.

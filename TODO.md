@@ -2,6 +2,7 @@
 
 - [ ] Shell: send a notification via Discord with a flag (msg and loop)
 - [ ] Claws: support loop command
+- [ ] Loop: how to improve it? How to force the E2E test? Avoid spec for testing
 - [ ] Shell: better track of progress?
 - [ ] Specs: with Allium?
 - [ ] Specs: TTS and STT

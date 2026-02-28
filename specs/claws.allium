@@ -47,6 +47,8 @@ entity Bot {
     model: Model?
     sandbox: Sandbox?
     destination: DiscordDestination
+    receive_all: Boolean
+    last_user_id: String?
     status: running | stopped
 }
 
@@ -95,6 +97,8 @@ rule StartBot {
         model: ResolvedModel(state),
         sandbox: ResolvedSandbox(state),
         destination: ResolvedDiscordDestination(state, profile),
+        receive_all: ResolvedReceiveAll(state),
+        last_user_id: null,
         status: running
     )
     ensures: BotConnected(bot)
@@ -118,12 +122,17 @@ rule StopBot {
 -- A Discord message directed at the bot (DM or @mention in a channel).
 -- All messages go to the bot's current conversation regardless of source.
 -- Only allowed users (per bot profile) can interact with the bot.
+-- The bot tracks the last authorized user ID for cron DM delivery fallback.
 rule HandleDiscordMessage {
     when: DiscordMessageReceived(bot, message, source)
 
     requires: bot.status = running
     requires: message.source.user_id in bot.profile.allowed_users
     requires: matches_destination(bot.destination, message.source)
+    requires: should_process_message(bot, message.source)
+
+    -- Track last authorized user for cron DM fallback
+    ensures: bot.last_user_id = message.source.user_id
 
     -- Delegate to breo's SendMessage (conversation.allium)
     ensures: SendMessage(
@@ -158,6 +167,16 @@ rule matches_destination(destination, source) {
     match destination {
         Dm        => source.kind = direct_message
         Channel(id) => source.channel_id = id
+    }
+}
+
+-- Message processing filter: in channels, require @mention unless receive_all is true.
+-- DMs are always processed (they are inherently directed at the bot).
+rule should_process_message(bot, source) {
+    match source.kind {
+        direct_message  => true
+        channel_mention => true
+        channel         => bot.receive_all
     }
 }
 
@@ -276,7 +295,8 @@ rule BotStatus {
                  "\nagent: " + bot.backend.name +
                  "\nmodel: " + (bot.model.name ?? "default") +
                  "\nsandbox: " + (bot.sandbox.name ?? "none") +
-                 "\ndestination: " + destination_display
+                 "\ndestination: " + destination_display +
+                 "\nreceive_all: " + bot.receive_all
     )
 }
 
@@ -322,6 +342,34 @@ rule BotNewConversation {
     ensures: DiscordMessageSent(
         target: command.source,
         content: "Created and switched to conversation: " + conversation_name
+    )
+}
+
+-- Toggle or set whether the bot receives all channel messages without @mention.
+rule BotReceiveAll {
+    when: BotCommand(bot, "receive-all", argument)
+
+    requires: bot.status = running
+    requires: command.source.user_id in bot.profile.allowed_users
+
+    let new_value =
+        if argument = "on":
+            true
+        else if argument = "off":
+            false
+        else:
+            not bot.receive_all    -- toggle
+
+    ensures: bot.receive_all = new_value
+    ensures: directory_state.receive_all = new_value
+    ensures: StateCommitted(bot.directory)
+    ensures: DiscordMessageSent(
+        target: command.source,
+        content:
+            if new_value:
+                "Receive all: on (processing all messages in channel)"
+            else:
+                "Receive all: off (only processing @mentions)"
     )
 }
 
@@ -555,3 +603,11 @@ deferred save_cron_file              -- write updated CronFile back to .breo/cro
 --   a task takes longer than the poll interval.
 -- Cron task management is done by the LLM agent editing .breo/cron.toml,
 --   not via Discord commands. The comment header in the file guides the agent.
+-- receive_all controls whether the bot processes all channel messages or only @mentions.
+--   Resolution cascade: CLI --receive-all > directory state > false.
+--   Toggled via !receive-all [on|off] (omit argument to toggle). Persisted to state.
+-- last_user_id tracks the most recent authorized user who interacted with the bot.
+--   Used as fallback for cron task DM delivery when no explicit user_id is set on the task.
+--   Updated on every authorized message. Skips the bot's own user ID.
+-- Auto-push has been removed. Git commits are still automatic, but push/pull
+--   are now manual via `breo git push` and `breo git pull`.

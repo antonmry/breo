@@ -18,14 +18,12 @@
 entity GlobalConfig {
     sandbox_enabled: Boolean
     sandbox_name: String
-    auto_push: Boolean
     default_agent: claude | codex | gemini
     discord_bots: Map<String, BotProfile>
 
     -- defaults
     default sandbox_enabled = true
     default sandbox_name = "default"
-    default auto_push = true
     default default_agent = claude
     default discord_bots = {}
 }
@@ -38,6 +36,7 @@ entity DirectoryState {
     model: String?
     sandbox: String?
     discord_destination: DiscordDestination?
+    receive_all: Boolean?
     dir_id: String?
 }
 
@@ -122,16 +121,19 @@ rule ResolveDiscordDestination {
     )
 }
 
--- Push resolution: --no-push flag > global config.
-rule ResolvePush {
-    when: ResolvePush(no_push, global_config)
+-- Receive-all resolution: CLI --receive-all > directory state > false.
+-- Determines whether the bot processes all messages in a channel (without @mention).
+rule ResolveReceiveAll {
+    when: ResolveReceiveAll(cli_receive_all, directory_state)
 
-    ensures: ResolvedPush(
-        push:
-            if no_push:
-                false
+    ensures: ResolvedReceiveAll(
+        receive_all:
+            if cli_receive_all != null:
+                cli_receive_all
+            else if directory_state.receive_all != null:
+                directory_state.receive_all
             else:
-                global_config.auto_push
+                false
     )
 }
 
@@ -143,13 +145,14 @@ rule ResolvePush {
 -- After sending a message or completing a loop, save the active settings
 -- back to directory state so they persist across invocations.
 rule PersistDirectoryState {
-    when: PersistDirectoryState(directory, conversation_name, backend_name, model_name, sandbox_name, discord_destination)
+    when: PersistDirectoryState(directory, conversation_name, backend_name, model_name, sandbox_name, discord_destination, receive_all)
 
     ensures: directory_state.active_conversation = conversation_name
     ensures: directory_state.agent = backend_name
     ensures: directory_state.model = model_name
     ensures: directory_state.sandbox = sandbox_name
     ensures: directory_state.discord_destination = discord_destination
+    ensures: directory_state.receive_all = receive_all
 }
 
 
@@ -221,7 +224,8 @@ rule ShowStatus {
         agent: state.agent,
         model: state.model,
         sandbox: state.sandbox,
-        discord_destination: state.discord_destination
+        discord_destination: state.discord_destination,
+        receive_all: state.receive_all
     )
 }
 
@@ -245,6 +249,9 @@ deferred directory_conversations_path  -- ~/.config/breo/conversations/<dir-id>
 --   Resolution cascade: CLI -d > directory state > default (DM to first allowed user).
 --   Accepted values: a channel ID (delivers to channel) or "dm" (delivers via DM).
 --   Default is DM to the first user in the bot's allowed_users list.
+-- Per-directory state includes receive_all (whether bot processes all channel messages).
+--   Resolution cascade: CLI --receive-all > directory state > false.
+-- Auto-push has been removed. Use `breo git push` and `breo git pull` for manual sync.
 -- Fuzzy picker filters by conversation name only. Content search is out of scope.
 -- No per-directory config files. Global config (~/.config/breo/config.toml) only.
 

@@ -1016,6 +1016,7 @@ pub(crate) fn cmd_claws(
             allowed_users,
             cron_started: false,
         }));
+        state.lock().await.persist();
 
         let handler = ClawsHandler {
             state: state.clone(),
