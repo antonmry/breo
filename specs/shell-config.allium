@@ -37,6 +37,7 @@ entity DirectoryState {
     sandbox: String?
     discord_destination: DiscordDestination?
     receive_all: Boolean?
+    bot: String?
     dir_id: String?
 }
 
@@ -137,6 +138,25 @@ rule ResolveReceiveAll {
     )
 }
 
+-- Bot mirror resolution: --no-bot (force off) > CLI --bot > directory state > null.
+-- Determines which bot profile is used to mirror CLI/loop output to Discord.
+-- When set, messages and responses are sent to the bot's Discord destination.
+rule ResolveBotMirror {
+    when: ResolveBotMirror(no_bot, cli_bot, directory_state)
+
+    ensures: ResolvedBotMirror(
+        bot:
+            if no_bot:
+                null
+            else if cli_bot != null:
+                cli_bot
+            else if directory_state.bot != null:
+                directory_state.bot
+            else:
+                null
+    )
+}
+
 
 -- ==========================================================================
 -- State persistence
@@ -145,7 +165,7 @@ rule ResolveReceiveAll {
 -- After sending a message or completing a loop, save the active settings
 -- back to directory state so they persist across invocations.
 rule PersistDirectoryState {
-    when: PersistDirectoryState(directory, conversation_name, backend_name, model_name, sandbox_name, discord_destination, receive_all)
+    when: PersistDirectoryState(directory, conversation_name, backend_name, model_name, sandbox_name, discord_destination, receive_all, bot)
 
     ensures: directory_state.active_conversation = conversation_name
     ensures: directory_state.agent = backend_name
@@ -153,6 +173,7 @@ rule PersistDirectoryState {
     ensures: directory_state.sandbox = sandbox_name
     ensures: directory_state.discord_destination = discord_destination
     ensures: directory_state.receive_all = receive_all
+    ensures: directory_state.bot = bot
 }
 
 
@@ -225,7 +246,8 @@ rule ShowStatus {
         model: state.model,
         sandbox: state.sandbox,
         discord_destination: state.discord_destination,
-        receive_all: state.receive_all
+        receive_all: state.receive_all,
+        bot: state.bot
     )
 }
 
@@ -252,6 +274,9 @@ deferred directory_conversations_path  -- ~/.config/breo/conversations/<dir-id>
 -- Per-directory state includes receive_all (whether bot processes all channel messages).
 --   Resolution cascade: CLI --receive-all > directory state > false.
 -- Auto-push has been removed. Use `breo git push` and `breo git pull` for manual sync.
+-- Per-directory state includes bot (which bot profile mirrors CLI/loop output to Discord).
+--   Resolution cascade: --no-bot (force off) > CLI --bot > directory state > null (no mirroring).
+--   --no-bot clears the bot from state (persists the removal).
 -- Fuzzy picker filters by conversation name only. Content search is out of scope.
 -- No per-directory config files. Global config (~/.config/breo/config.toml) only.
 

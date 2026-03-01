@@ -65,12 +65,14 @@ breo -f src/main.rs "Review this code"
 | `breo list`                       | List all conversations for the current directory     |
 | `breo pick`                       | Fuzzy-pick a conversation (for shell integration)    |
 | `breo rename <old> <new>`         | Rename a conversation                                |
-| `breo status`                     | Show directory, conversation, agent, model, sandbox  |
+| `breo status`                     | Show directory, conversation, agent, model, sandbox, bot |
 | `breo compact [name]`             | Summarize a conversation to save context             |
 | `breo setup <shell>`              | Print shell setup for TAB completion                 |
 | `breo loop <plan> <verification>` | Run an implement/validate loop                       |
 | `breo claws <bot>`                | Start a Discord bridge for a named bot profile       |
 | `breo claws list`                 | List configured bot profiles                         |
+| `breo git push`                   | Push conversations to the remote repository          |
+| `breo git pull`                   | Pull conversations from the remote repository        |
 
 ## Options
 
@@ -82,7 +84,9 @@ breo -f src/main.rs "Review this code"
 | `-f, --files <path>...`     | Attach files to the prompt                       |
 | `-s, --sandbox <name>`      | Lima VM instance name                            |
 | `--no-sandbox`              | Disable sandbox mode                             |
-| `--no-push`                 | Disable auto-push after commit                   |
+| `-b, --bot <name>`          | Mirror messages and responses to Discord via a bot profile |
+| `--no-bot`                  | Disable Discord mirroring and clear from state   |
+| `-d, --destination <target>`| Discord destination for mirroring (channel ID or "dm") |
 
 ## Backends and Models
 
@@ -166,8 +170,12 @@ snippets, and current state while reducing token count.
 
 All conversations are automatically version-controlled in a git repository at
 `~/.config/breo/`. Every message, new conversation, and compaction triggers a
-commit. Auto-push is enabled by default and can be disabled with `--no-push` or
-in the config.
+commit. Push and pull are manual:
+
+```bash
+breo git push    # push conversations to remote
+breo git pull    # pull conversations from remote
+```
 
 ## Sandbox Mode
 
@@ -218,6 +226,7 @@ Once the bot is running, send these commands in Discord:
 | `!agent <name>`      | Switch backend (claude, codex, gemini)     |
 | `!model <name>`      | Switch model                               |
 | `!destination <target>` | Set response destination (channel ID or "dm") |
+| `!receive-all [on\|off]` | Toggle whether bot processes all channel messages |
 | `!compact`           | Compact the active conversation            |
 
 All commands require the user to be in the bot's `allowed_users` list.
@@ -282,6 +291,8 @@ Options for loop:
 | `--review-agent` | Backend for the validator (defaults to `--agent`) |
 | `--review-model` | Model for the validator (defaults to `--model`)   |
 | `-f, --files`    | Files to attach to the implementer prompt         |
+| `--bot`          | Mirror loop progress to Discord via a bot profile |
+| `-d, --destination` | Discord destination for mirroring (channel ID or "dm") |
 
 ## Shell Completion
 
@@ -312,9 +323,6 @@ agent = "claude"
 sandbox = true
 sandbox_name = "default"
 
-# Auto-push after commits
-push = true
-
 # Discord bot profiles (for `breo claws`)
 [discord.bots.mybot]
 bot_token = "YOUR_DISCORD_BOT_TOKEN"
@@ -331,12 +339,15 @@ allowed_users = ["USER_ID_1", "USER_ID_2"]
 
 Settings are resolved in order of precedence:
 
-| Setting     | CLI flag       | Per-directory state | Global config   |
-| ----------- | -------------- | ------------------- | --------------- |
-| Backend     | `--agent`      | last used agent     | `agent`         |
-| Model       | `--model`      | last used model     | backend default |
-| Sandbox     | `--sandbox`    | last used sandbox   | `sandbox_name`  |
-| Destination | `-d`           | last set destination| DM (default)    |
+| Setting     | CLI flag         | Per-directory state  | Global config   |
+| ----------- | ---------------- | -------------------- | --------------- |
+| Backend     | `--agent`        | last used agent      | `agent`         |
+| Model       | `--model`        | last used model      | backend default |
+| Sandbox     | `--sandbox`      | last used sandbox    | `sandbox_name`  |
+| Destination | `-d`             | last set destination | DM (default)    |
+| Bot         | `--bot`/`--no-bot` | last used bot      | (none)          |
+| Receive all | `--receive-all`  | last set value       | false           |
 
-Per-directory state (active conversation, agent, model, sandbox, destination) is
-persisted in `~/.config/breo/state.toml` and carries across invocations.
+Per-directory state (active conversation, agent, model, sandbox, destination,
+bot, receive_all) is persisted in `~/.config/breo/state.toml` and carries
+across invocations.
