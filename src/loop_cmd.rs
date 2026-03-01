@@ -1,4 +1,5 @@
-use crate::config::{Backend, backend_name};
+use crate::claws::{DiscordDestination, mirror_to_discord};
+use crate::config::{Backend, DiscordBotProfile, backend_name};
 use crate::conversation::{cmd_send, cmd_send_inner};
 use std::fs;
 use std::io;
@@ -160,6 +161,8 @@ pub(crate) fn cmd_loop(
     review_backend: &Backend,
     files: &[PathBuf],
     sandbox: Option<&str>,
+    bot_profile: Option<&DiscordBotProfile>,
+    destination: &DiscordDestination,
 ) -> String {
     if let Err(msg) = validate_loop_files(plan_path, verification_path) {
         eprintln!("{msg}");
@@ -202,10 +205,12 @@ pub(crate) fn cmd_loop(
         );
 
         if !success {
-            eprintln!(
-                "{}",
-                format_review_failure(sandbox, review_backend, &response_or_err, &name)
-            );
+            let failure_msg =
+                format_review_failure(sandbox, review_backend, &response_or_err, &name);
+            eprintln!("{failure_msg}");
+            if let Some(profile) = bot_profile {
+                mirror_to_discord(profile, destination, "[loop] Review failed", &failure_msg);
+            }
             return name;
         }
 
@@ -218,11 +223,27 @@ pub(crate) fn cmd_loop(
                     let _ = f.write_all(final_status.as_bytes());
                 }
                 eprintln!("[loop] === SUCCESS after {} attempt(s) ===", iteration);
+                if let Some(profile) = bot_profile {
+                    mirror_to_discord(
+                        profile,
+                        destination,
+                        &format!("[loop] Attempt {iteration}"),
+                        &format!("SUCCESS after {} attempt(s)", iteration),
+                    );
+                }
                 return name;
             }
             ReviewVerdict::Retry(feedback) => {
                 eprintln!("[loop] Verdict: RETRY");
                 eprintln!("[loop] Feedback: {}", truncate_display(&feedback, 120));
+                if let Some(profile) = bot_profile {
+                    mirror_to_discord(
+                        profile,
+                        destination,
+                        &format!("[loop] Attempt {iteration} review"),
+                        &format!("RETRY: {}", truncate_display(&feedback, 500)),
+                    );
+                }
 
                 iteration += 1;
                 let retry_message = build_retry_message(plan_path);

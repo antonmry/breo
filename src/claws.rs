@@ -62,6 +62,15 @@ pub(crate) enum DiscordDestination {
     Dm,
 }
 
+impl std::fmt::Display for DiscordDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Channel(id) => write!(f, "{id}"),
+            Self::Dm => write!(f, "dm"),
+        }
+    }
+}
+
 impl DiscordDestination {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         let trimmed = value.trim();
@@ -126,6 +135,7 @@ impl DiscordBotState {
             self.sandbox.as_deref(),
             Some(&self.destination.to_storage()),
             Some(self.receive_all),
+            None, // bot profile is set at CLI level, not from Discord
         );
     }
 }
@@ -270,7 +280,7 @@ pub(crate) fn plan_command_action(
             CommandAction::RunCompact(state.conversation.clone())
         }
         _ => CommandAction::ErrorToSource(
-            "Unknown command. Use: !switch, !agent, !model, !destination, !status, !list, !new, !compact".into(),
+            "Unknown command. Use: !switch, !agent, !model, !destination, !receive-all, !status, !list, !new, !compact".into(),
         ),
     }
 }
@@ -346,6 +356,36 @@ pub(crate) fn build_status_text(state: &DiscordBotState, dir: &str) -> String {
         state.destination.display(),
         state.receive_all,
     )
+}
+
+/// Sends the user message and LLM response to Discord using the given bot profile.
+/// Used by CLI commands (breo <msg>, breo loop) when --bot is set.
+pub(crate) fn mirror_to_discord(
+    profile: &crate::config::DiscordBotProfile,
+    destination: &DiscordDestination,
+    user_message: &str,
+    llm_response: &str,
+) {
+    let token = profile.bot_token.clone();
+    let allowed_users = profile.allowed_users.clone();
+    let text = format!("**> {}**\n\n{}", user_message, llm_response);
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[mirror] Failed to create async runtime: {e}");
+            return;
+        }
+    };
+
+    rt.block_on(async {
+        let http = serenity::http::Http::new(&token);
+        if let Err(e) =
+            ClawsHandler::send_to_destination(&http, destination, &allowed_users, &text).await
+        {
+            eprintln!("[mirror] Failed to send to Discord: {e}");
+        }
+    });
 }
 
 pub(crate) struct ClawsHandler {
@@ -3039,5 +3079,17 @@ interval = "1h"
             status: CronTaskStatus::Pending,
         };
         assert!(task.interval.is_none());
+    }
+
+    #[test]
+    fn unknown_command_lists_available() {
+        let state = sample_state();
+        match plan_command_action("invalid", "", &state, false, &[], 0) {
+            CommandAction::ErrorToSource(msg) => {
+                assert!(msg.contains("!receive-all"));
+                assert!(!msg.contains("!mirror"));
+            }
+            _ => panic!("expected ErrorToSource"),
+        }
     }
 }

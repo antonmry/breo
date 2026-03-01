@@ -161,6 +161,7 @@ pub(crate) struct DirState {
     pub(crate) sandbox: Option<String>,
     pub(crate) discord_destination: Option<String>,
     pub(crate) receive_all: Option<bool>,
+    pub(crate) bot: Option<String>,
     pub(crate) dir_id: Option<String>,
 }
 
@@ -253,6 +254,7 @@ pub(crate) fn cmd_status() {
         .as_deref()
         .unwrap_or("(default dm)");
     let receive_all = state.receive_all.unwrap_or(false);
+    let bot = state.bot.as_deref().unwrap_or("(not set)");
     println!("directory:    {}", current_dir_key());
     println!(
         "config:       {}",
@@ -268,6 +270,7 @@ pub(crate) fn cmd_status() {
     println!("sandbox:      {sandbox}");
     println!("destination:  {destination}");
     println!("receive_all:  {receive_all}");
+    println!("bot:          {bot}");
 }
 
 pub(crate) fn cmd_setup(shell: &ShellType) {
@@ -354,6 +357,7 @@ pub(crate) fn persist_dir_state(
     sandbox: Option<&str>,
     discord_destination: Option<&str>,
     receive_all: Option<bool>,
+    bot: Option<&str>,
 ) {
     let mut state = load_dir_state();
     state.conversation = Some(conversation.to_string());
@@ -362,6 +366,7 @@ pub(crate) fn persist_dir_state(
     state.sandbox = sandbox.map(ToString::to_string);
     state.discord_destination = discord_destination.map(ToString::to_string);
     state.receive_all = receive_all;
+    state.bot = bot.map(ToString::to_string);
     save_dir_state(&state);
     crate::conversation::git_commit_state();
 }
@@ -509,11 +514,13 @@ mod tests {
             sandbox: Some("default".into()),
             discord_destination: Some("dm".into()),
             receive_all: Some(true),
+            bot: Some("mybot".into()),
             dir_id: Some("id".into()),
         };
         let t = toml::to_string(&s).expect("serialize");
         let back: DirState = toml::from_str(&t).expect("deserialize");
         assert_eq!(back.conversation.as_deref(), Some("c"));
+        assert_eq!(back.bot.as_deref(), Some("mybot"));
         assert_eq!(back.dir_id.as_deref(), Some("id"));
     }
 
@@ -768,6 +775,7 @@ allowed_users = ["user1"]
                 Some("vm"),
                 Some("dm"),
                 Some(true),
+                Some("mybot"),
             );
         });
     }
@@ -1045,12 +1053,14 @@ token = "aliased-bot-tok"
                 Some("vm1"),
                 Some("dm"),
                 Some(true),
+                Some("mybot"),
             );
             let state = load_dir_state();
             assert_eq!(state.agent.as_deref(), Some("gemini"));
             assert_eq!(state.model.as_deref(), Some("opus"));
             assert_eq!(state.sandbox.as_deref(), Some("vm1"));
             assert_eq!(state.receive_all, Some(true));
+            assert_eq!(state.bot.as_deref(), Some("mybot"));
             assert_eq!(state.discord_destination.as_deref(), Some("dm"));
         });
     }

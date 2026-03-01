@@ -10,13 +10,14 @@ use clap_complete::env::CompleteEnv;
 use std::io::{self, IsTerminal, Read as _};
 use std::path::PathBuf;
 
-use crate::claws::{DiscordDestination, cmd_claws, cmd_claws_list};
+use crate::claws::{DiscordDestination, cmd_claws, cmd_claws_list, mirror_to_discord};
+use crate::config::DiscordBotProfile;
 use crate::config::{
     Backend, ShellType, cmd_setup, cmd_status, list_conversations, list_discord_bots, list_models,
     load_config, load_dir_state, persist_dir_state,
 };
 use crate::conversation::{
-    cmd_compact, cmd_list, cmd_new, cmd_pick, cmd_rename, cmd_send, git_pull, git_push,
+    cmd_compact, cmd_list, cmd_new, cmd_pick, cmd_rename, cmd_send_inner, git_pull, git_push,
 };
 use crate::loop_cmd::cmd_loop;
 
@@ -47,6 +48,18 @@ struct Cli {
 
     #[arg(long)]
     no_sandbox: bool,
+
+    /// Send messages and responses to Discord via a bot profile
+    #[arg(short, long, add = ArgValueCandidates::new(list_discord_bots))]
+    bot: Option<String>,
+
+    /// Disable Discord mirroring for this session
+    #[arg(long)]
+    no_bot: bool,
+
+    /// Discord destination for mirroring (channel ID or "dm")
+    #[arg(short = 'd', long)]
+    destination: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -105,6 +118,14 @@ enum Commands {
 
         #[arg(long)]
         no_sandbox: bool,
+
+        /// Send messages and responses to Discord via a bot profile
+        #[arg(short, long, add = ArgValueCandidates::new(list_discord_bots))]
+        bot: Option<String>,
+
+        /// Discord destination for loop mirroring (channel ID or "dm")
+        #[arg(short = 'd', long)]
+        destination: Option<String>,
     },
     /// Sync conversations with a remote git repository
     Git {
@@ -116,7 +137,7 @@ Start the Discord bot bridge for the current directory.
 
 The bot responds to DMs and @mentions in channels. Messages are routed
 through the same LLM backend as `breo send`, with full conversation
-persistence. Use --listen-all to process all messages in the destination
+persistence. Use --receive-all to process all messages in the destination
 channel without requiring @mentions.
 
 Bot commands (send as a Discord message):
@@ -201,6 +222,18 @@ fn resolve_destination(
         .unwrap_or(DiscordDestination::Dm)
 }
 
+fn resolve_bot(
+    no_bot: bool,
+    cli_bot: Option<String>,
+    dir_state_bot: Option<String>,
+) -> Option<String> {
+    if no_bot {
+        None
+    } else {
+        cli_bot.or(dir_state_bot)
+    }
+}
+
 fn resolve_sandbox(
     no_sandbox: bool,
     cli_sandbox: Option<String>,
@@ -279,6 +312,15 @@ fn main() {
     let sandbox = sandbox_name.as_deref();
 
     let resolved_model: Option<String> = resolve_model(cli.model.clone(), dir_state.model.clone());
+    let resolved_bot = resolve_bot(cli.no_bot, cli.bot.clone(), dir_state.bot.clone());
+    let bot_profile: Option<DiscordBotProfile> = resolved_bot
+        .as_ref()
+        .and_then(|name| config.find_discord_profile(name));
+    let resolved_destination = resolve_destination(
+        cli.destination.as_deref(),
+        dir_state.discord_destination.as_deref(),
+    );
+    let resolved_destination_str = resolved_destination.to_string();
 
     let save_after_send = |conversation: &str| {
         persist_dir_state(
@@ -286,8 +328,9 @@ fn main() {
             &backend,
             resolved_model.as_deref(),
             sandbox,
-            dir_state.discord_destination.as_deref(),
+            Some(resolved_destination_str.as_str()),
             dir_state.receive_all,
+            resolved_bot.as_deref(),
         );
     };
 
@@ -366,11 +409,19 @@ fn main() {
                 files,
                 sandbox: loop_sandbox,
                 no_sandbox: loop_no_sandbox,
+                bot: loop_bot,
+                destination: loop_destination,
             }),
         ) => {
             let loop_sandbox_name =
                 resolve_loop_sandbox(loop_no_sandbox, loop_sandbox, sandbox_name.clone());
             let loop_sandbox_ref = loop_sandbox_name.as_deref();
+            let loop_bot_profile = resolve_bot(cli.no_bot, loop_bot, dir_state.bot.clone())
+                .and_then(|name| config.find_discord_profile(&name));
+            let loop_dest = resolve_destination(
+                loop_destination.as_deref(),
+                dir_state.discord_destination.as_deref(),
+            );
 
             let impl_be = loop_agent.unwrap_or_else(|| backend.clone());
             let model_ref = resolved_model.as_deref();
@@ -387,18 +438,33 @@ fn main() {
                 &review_be,
                 &files,
                 loop_sandbox_ref,
+                loop_bot_profile.as_ref(),
+                &loop_dest,
             );
             save_after_send(&name);
         }
         (Some(message), None) => {
-            let name = cmd_send(
+            let (name, response, success) = cmd_send_inner(
                 &message,
                 cli.conversation.as_deref(),
                 resolved_model.as_deref(),
                 &backend,
                 &cli.files,
                 sandbox,
+                true,
             );
+            if !success {
+                let label = if sandbox.is_some() {
+                    "limactl"
+                } else {
+                    crate::config::backend_name(&backend)
+                };
+                eprintln!("{label} failed: {response}");
+                std::process::exit(1);
+            }
+            if let Some(ref profile) = bot_profile {
+                mirror_to_discord(profile, &resolved_destination, &message, &response);
+            }
             save_after_send(&name);
         }
         (None, None) => {
@@ -407,14 +473,27 @@ fn main() {
                 io::stdin().read_to_string(&mut input).unwrap_or_default();
                 let input = input.trim();
                 if !input.is_empty() {
-                    let name = cmd_send(
+                    let (name, response, success) = cmd_send_inner(
                         input,
                         cli.conversation.as_deref(),
                         resolved_model.as_deref(),
                         &backend,
                         &cli.files,
                         sandbox,
+                        true,
                     );
+                    if !success {
+                        let label = if sandbox.is_some() {
+                            "limactl"
+                        } else {
+                            crate::config::backend_name(&backend)
+                        };
+                        eprintln!("{label} failed: {response}");
+                        std::process::exit(1);
+                    }
+                    if let Some(ref profile) = bot_profile {
+                        mirror_to_discord(profile, &resolved_destination, input, &response);
+                    }
                     save_after_send(&name);
                     return;
                 }
@@ -1209,5 +1288,70 @@ mod tests {
                 action: GitAction::Pull
             })
         ));
+    }
+
+    // --- resolve_bot tests ---
+
+    #[test]
+    fn resolve_bot_cli_overrides() {
+        assert_eq!(
+            resolve_bot(false, Some("cli-bot".into()), Some("state-bot".into())),
+            Some("cli-bot".into())
+        );
+    }
+
+    #[test]
+    fn resolve_bot_dir_state_fallback() {
+        assert_eq!(
+            resolve_bot(false, None, Some("state-bot".into())),
+            Some("state-bot".into())
+        );
+    }
+
+    #[test]
+    fn resolve_bot_default_none() {
+        assert_eq!(resolve_bot(false, None, None), None);
+    }
+
+    #[test]
+    fn resolve_bot_no_bot_clears() {
+        assert_eq!(
+            resolve_bot(true, Some("cli-bot".into()), Some("state-bot".into())),
+            None
+        );
+    }
+
+    // --- CLI parse --bot flag ---
+
+    #[test]
+    fn cli_parse_with_bot_flag() {
+        let cli = Cli::try_parse_from(["breo", "--bot", "mybot", "hello"]).expect("parse");
+        assert_eq!(cli.bot.as_deref(), Some("mybot"));
+        assert_eq!(cli.message.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn cli_parse_without_bot_flag() {
+        let cli = Cli::try_parse_from(["breo", "hello"]).expect("parse");
+        assert!(cli.bot.is_none());
+    }
+
+    #[test]
+    fn cli_parse_loop_with_bot() {
+        let cli =
+            Cli::try_parse_from(["breo", "loop", "P.md", "V.md", "--bot", "mybot"]).expect("parse");
+        match cli.command {
+            Some(Commands::Loop { bot, .. }) => assert_eq!(bot.as_deref(), Some("mybot")),
+            _ => panic!("expected Loop"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_loop_without_bot() {
+        let cli = Cli::try_parse_from(["breo", "loop", "P.md", "V.md"]).expect("parse");
+        match cli.command {
+            Some(Commands::Loop { bot, .. }) => assert!(bot.is_none()),
+            _ => panic!("expected Loop"),
+        }
     }
 }

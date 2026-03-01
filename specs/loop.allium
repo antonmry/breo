@@ -8,6 +8,7 @@
 --   - Sandbox execution (see sandbox.allium)
 --   - Configuration and shell integration (see shell-config.allium)
 -- Dependencies: Conversation, Backend, Model from conversation.allium
+--              BotProfile, DiscordDestination, MirrorToDiscord from claws.allium
 
 
 -- A single run of the implement/validate loop.
@@ -22,6 +23,8 @@ entity Loop {
     implementer_model: Model?
     validator_model: Model?
     conversation: Conversation
+    bot_profile: BotProfile?
+    destination: DiscordDestination
     status: running | succeeded | failed
 
     -- Derived
@@ -69,7 +72,7 @@ value Verdict {
 -- Starting the implement/validate loop.
 -- Validates inputs, initialises RESULT.md, and runs the first attempt.
 rule StartLoop {
-    when: StartLoop(plan, verification, implementer, validator, implementer_model, validator_model, conversation)
+    when: StartLoop(plan, verification, implementer, validator, implementer_model, validator_model, conversation, bot_profile, destination)
 
     requires: plan.content != null
     requires: verification.content != null
@@ -87,6 +90,8 @@ rule StartLoop {
         implementer_model: implementer_model,
         validator_model: validator_model,
         conversation: conversation,
+        bot_profile: bot_profile,
+        destination: destination,
         status: running
     )
     ensures: RunImplementer(loop, 1)
@@ -159,6 +164,12 @@ rule LoopSucceeded {
     ensures: loop.status = succeeded
     ensures: loop.result.final_status =
         "Completed successfully after " + attempt_number + " attempt(s)."
+
+    -- Mirror success to Discord if bot is configured
+    ensures:
+        if loop.bot_profile != null:
+            MirrorToDiscord(loop.bot_profile, loop.destination,
+                "[loop] SUCCESS", loop.result.final_status)
 }
 
 -- The validator requested changes. Trigger another implementer attempt.
@@ -166,6 +177,12 @@ rule LoopRetry {
     when: LoopRetry(loop, attempt_number, feedback)
 
     requires: loop.status = running
+
+    -- Mirror retry feedback to Discord if bot is configured
+    ensures:
+        if loop.bot_profile != null:
+            MirrorToDiscord(loop.bot_profile, loop.destination,
+                "[loop] RETRY (attempt " + attempt_number + ")", feedback)
 
     ensures: RunImplementer(loop, attempt_number + 1)
 }
@@ -188,6 +205,9 @@ deferred parse_verdict    -- see: verdict parsing logic in main.rs
 -- No maximum attempt limit. The loop runs until SUCCESS or user interrupts (Ctrl-C).
 -- Implementer and validator share the same conversation (one conversation per feature).
 -- RESULT.md is always in the working directory. It is ephemeral, not a persistent artifact.
+-- Loop supports --bot and --destination flags for Discord mirroring.
+--   When --bot is set, loop outcomes (SUCCESS, RETRY + feedback, review failures)
+--   are mirrored to the bot's Discord destination via MirrorToDiscord (see claws.allium).
 
 -- ==========================================================================
 -- Known issue

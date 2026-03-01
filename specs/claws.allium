@@ -552,6 +552,29 @@ rule ReschedulePeriodicTask {
 
 
 -- ==========================================================================
+-- Mirror (CLI/loop to Discord)
+-- ==========================================================================
+
+-- When --bot is set on `breo <message>` or `breo loop`, mirror the user message
+-- and LLM response to the bot's Discord destination. This allows CLI activity
+-- to be visible in a Discord channel or DM without running the full claws bot.
+-- Uses the bot profile's token to authenticate and the resolved destination
+-- to determine where to send.
+rule MirrorToDiscord {
+    when: MirrorToDiscord(bot_profile, destination, user_message, llm_response)
+
+    requires: bot_profile != null
+
+    let text = "**> " + user_message + "**\n\n" + llm_response
+    let chunks = split_message(text, 2000)
+
+    ensures:
+        for chunk in chunks:
+            DeliverToDestination(destination, chunk)
+}
+
+
+-- ==========================================================================
 -- Black boxes
 -- ==========================================================================
 
