@@ -202,6 +202,7 @@ pub(crate) fn cmd_loop(
             &[],
             sandbox,
             false,
+            None,
         );
 
         if !success {

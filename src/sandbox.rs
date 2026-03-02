@@ -103,6 +103,7 @@ pub(crate) fn execute_command_inner(
     sandboxed: bool,
     backend: &Backend,
     stream: bool,
+    line_tx: Option<std::sync::mpsc::Sender<String>>,
 ) -> (String, String, bool) {
     let bin = if sandboxed {
         "limactl"
@@ -139,6 +140,9 @@ pub(crate) fn execute_command_inner(
                         use io::Write;
                         let _ = io::stdout().flush();
                     }
+                    if let Some(ref tx) = line_tx {
+                        let _ = tx.send(l.clone());
+                    }
                     stdout_buf.push_str(&l);
                     stdout_buf.push('\n');
                 }
@@ -167,7 +171,7 @@ pub(crate) fn execute_command(
     sandboxed: bool,
     backend: &Backend,
 ) -> (String, String, bool) {
-    execute_command_inner(cmd, prompt, sandboxed, backend, true)
+    execute_command_inner(cmd, prompt, sandboxed, backend, true, None)
 }
 
 #[cfg(test)]
@@ -265,7 +269,8 @@ mod tests {
     fn execute_command_inner_with_echo() {
         let mut cmd = Command::new("echo");
         cmd.arg("hello world");
-        let (stdout, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false);
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, false, None);
         assert!(success);
         assert!(stdout.contains("hello world"));
     }
@@ -274,7 +279,8 @@ mod tests {
     fn execute_command_inner_streaming() {
         let mut cmd = Command::new("echo");
         cmd.arg("stream-test");
-        let (stdout, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, true);
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, true, None);
         assert!(success);
         assert!(stdout.contains("stream-test"));
     }
@@ -292,7 +298,7 @@ mod tests {
     fn execute_command_inner_sandboxed_label() {
         // Test with a command that always succeeds
         let cmd = Command::new("true");
-        let (_, _, success) = execute_command_inner(cmd, "", true, &Backend::Claude, false);
+        let (_, _, success) = execute_command_inner(cmd, "", true, &Backend::Claude, false, None);
         assert!(success);
     }
 
@@ -301,7 +307,7 @@ mod tests {
         // cat reads stdin and outputs it
         let cmd = Command::new("cat");
         let (stdout, _, success) =
-            execute_command_inner(cmd, "from-stdin", false, &Backend::Claude, false);
+            execute_command_inner(cmd, "from-stdin", false, &Backend::Claude, false, None);
         assert!(success);
         assert!(stdout.contains("from-stdin"));
     }
@@ -309,7 +315,7 @@ mod tests {
     #[test]
     fn execute_command_inner_failing_command() {
         let cmd = Command::new("false");
-        let (_, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false);
+        let (_, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false, None);
         assert!(!success);
     }
 
@@ -317,7 +323,8 @@ mod tests {
     fn execute_command_inner_multiline_output() {
         let mut cmd = Command::new("printf");
         cmd.arg("line1\nline2\nline3");
-        let (stdout, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false);
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, false, None);
         assert!(success);
         assert!(stdout.contains("line1"));
         assert!(stdout.contains("line2"));
@@ -328,7 +335,8 @@ mod tests {
     fn execute_command_inner_streaming_multiline() {
         let mut cmd = Command::new("printf");
         cmd.arg("a\nb\nc");
-        let (stdout, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, true);
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, true, None);
         assert!(success);
         assert!(stdout.contains("a"));
         assert!(stdout.contains("b"));
@@ -338,7 +346,8 @@ mod tests {
     #[test]
     fn execute_command_inner_empty_output() {
         let cmd = Command::new("true");
-        let (stdout, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false);
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, false, None);
         assert!(success);
         assert!(stdout.is_empty());
     }
@@ -348,7 +357,7 @@ mod tests {
         let cmd = Command::new("cat");
         let large_input = "x".repeat(100_000);
         let (stdout, _, success) =
-            execute_command_inner(cmd, &large_input, false, &Backend::Claude, false);
+            execute_command_inner(cmd, &large_input, false, &Backend::Claude, false, None);
         assert!(success);
         assert_eq!(stdout.trim(), large_input);
     }
@@ -387,7 +396,7 @@ mod tests {
         // When sandboxed=true, internal label should be "limactl"
         // Just verify it doesn't crash
         let cmd = Command::new("echo");
-        let (_, _, success) = execute_command_inner(cmd, "", true, &Backend::Claude, false);
+        let (_, _, success) = execute_command_inner(cmd, "", true, &Backend::Claude, false, None);
         assert!(success);
     }
 
@@ -469,7 +478,8 @@ mod tests {
     #[test]
     fn execute_command_inner_empty_stdin() {
         let cmd = Command::new("cat");
-        let (stdout, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false);
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, false, None);
         assert!(success);
         assert!(stdout.is_empty());
     }
@@ -478,7 +488,8 @@ mod tests {
     fn execute_command_inner_unicode_output() {
         let mut cmd = Command::new("printf");
         cmd.arg("hello 🌍 café");
-        let (stdout, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false);
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, false, None);
         assert!(success);
         assert!(stdout.contains("hello"));
     }
@@ -487,7 +498,7 @@ mod tests {
     fn execute_command_inner_exit_code_nonzero() {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("exit 42");
-        let (_, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false);
+        let (_, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false, None);
         assert!(!success);
     }
 
@@ -495,7 +506,8 @@ mod tests {
     fn execute_command_inner_stderr_inherited() {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("echo err >&2; echo out");
-        let (stdout, _, success) = execute_command_inner(cmd, "", false, &Backend::Claude, false);
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, false, None);
         assert!(success);
         assert!(stdout.contains("out"));
     }
@@ -536,5 +548,28 @@ mod tests {
                 backend
             );
         }
+    }
+
+    #[test]
+    fn execute_command_inner_line_tx_receives_lines() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cmd = Command::new("printf");
+        cmd.arg("alpha\nbeta\ngamma");
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, false, Some(tx));
+        assert!(success);
+        assert!(stdout.contains("alpha"));
+        let lines: Vec<String> = rx.try_iter().collect();
+        assert_eq!(lines, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn execute_command_inner_line_tx_none_still_works() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("no-tx");
+        let (stdout, _, success) =
+            execute_command_inner(cmd, "", false, &Backend::Claude, false, None);
+        assert!(success);
+        assert!(stdout.contains("no-tx"));
     }
 }

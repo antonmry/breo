@@ -452,6 +452,7 @@ fn main() {
                 &cli.files,
                 sandbox,
                 true,
+                None,
             );
             if !success {
                 let label = if sandbox.is_some() {
@@ -481,6 +482,7 @@ fn main() {
                         &cli.files,
                         sandbox,
                         true,
+                        None,
                     );
                     if !success {
                         let label = if sandbox.is_some() {

@@ -7,7 +7,7 @@ use crate::conversation::{
 };
 use crate::loop_cmd::truncate_display;
 use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDateTime};
-use serenity::all::{ChannelId, GatewayIntents, UserId};
+use serenity::all::{ChannelId, GatewayIntents, ReactionType, UserId};
 use serenity::async_trait;
 use serenity::model::channel::Message as DiscordMessage;
 use serenity::model::gateway::Ready;
@@ -15,6 +15,7 @@ use serenity::prelude::*;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::{Duration, sleep};
 
 const CRON_FILE_HEADER: &str = r#"# breo cron - scheduled messages for the claws Discord bot
@@ -55,6 +56,20 @@ const CRON_FILE_HEADER: &str = r#"# breo cron - scheduled messages for the claws
 #   next_run = 2026-02-24T15:30:00
 #   status = "pending"
 "#;
+
+/// Spawns a background task that sends `broadcast_typing` every 5 seconds.
+/// Returns a stop flag — set it to `true` to stop the loop.
+fn start_typing_loop(http: Arc<serenity::http::Http>, channel_id: ChannelId) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    tokio::spawn(async move {
+        while !stop_clone.load(Ordering::Relaxed) {
+            let _ = channel_id.broadcast_typing(&http).await;
+            sleep(Duration::from_secs(5)).await;
+        }
+    });
+    stop
+}
 
 #[derive(Clone)]
 pub(crate) enum DiscordDestination {
@@ -330,17 +345,6 @@ pub(crate) fn matches_destination(
     match destination {
         DiscordDestination::Dm => is_dm,
         DiscordDestination::Channel(dest_id) => channel_id == dest_id,
-    }
-}
-
-/// Classifies the result of a spawn_blocking send operation for response formatting.
-pub(crate) fn format_send_result(
-    result: Result<Result<String, String>, String>,
-) -> Result<String, String> {
-    match result {
-        Ok(Ok(response)) => Ok(response),
-        Ok(Err(err)) => Err(format!("Command failed: {err}")),
-        Err(err) => Err(format!("Worker failed: {err}")),
     }
 }
 
@@ -826,6 +830,17 @@ pub(crate) async fn execute_cron_task(
     let interval = task.interval.clone();
     let previous_next_run = task.next_run;
 
+    // Start continuous typing indicator for channel destinations
+    let typing_stop = if let DiscordDestination::Channel(ref ch) = destination {
+        if let Ok(id) = ch.parse::<u64>() {
+            Some(start_typing_loop(http.clone(), ChannelId::new(id)))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let send_result = tokio::task::spawn_blocking(move || {
         let (_, response_or_err, success) = cmd_send_inner(
             &task_message,
@@ -835,6 +850,7 @@ pub(crate) async fn execute_cron_task(
             &[],
             sandbox.as_deref(),
             false,
+            None,
         );
         if success {
             Ok(response_or_err)
@@ -843,6 +859,11 @@ pub(crate) async fn execute_cron_task(
         }
     })
     .await;
+
+    // Stop typing indicator
+    if let Some(stop) = typing_stop {
+        stop.store(true, Ordering::Relaxed);
+    }
 
     match send_result {
         Ok(Ok(response)) => {
@@ -870,7 +891,14 @@ pub(crate) async fn execute_cron_task(
             complete_cron_task(&task_name, previous_next_run, interval.as_deref());
         }
         Err(err) => {
-            eprintln!("[cron] Worker failure for task '{}': {err}", task_name);
+            eprintln!("[cron] Worker crashed for task '{}': {err}", task_name);
+            let _ = ClawsHandler::send_to_destination(
+                &http,
+                &destination,
+                &allowed_users,
+                &format!("Cron task '{task_name}' crashed: {err}"),
+            )
+            .await;
             complete_cron_task(&task_name, previous_next_run, interval.as_deref());
         }
     }
@@ -965,7 +993,12 @@ impl EventHandler for ClawsHandler {
             return;
         }
 
-        let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
+        // React with hourglass to acknowledge receipt
+        let hourglass = ReactionType::Unicode("⏳".to_string());
+        let _ = msg.react(&ctx, hourglass.clone()).await;
+
+        // Start continuous typing indicator
+        let typing_stop = start_typing_loop(ctx.http.clone(), msg.channel_id);
 
         let state = self.state.lock().await.clone();
         let conversation = state.conversation.clone();
@@ -974,7 +1007,10 @@ impl EventHandler for ClawsHandler {
         let sandbox = state.sandbox.clone();
         let message = content.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
+        // Line channel for streaming output and oneshot for final result
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        tokio::task::spawn_blocking(move || {
             let (_, response_or_err, success) = cmd_send_inner(
                 &message,
                 Some(&conversation),
@@ -983,24 +1019,106 @@ impl EventHandler for ClawsHandler {
                 &[],
                 sandbox.as_deref(),
                 false,
+                Some(line_tx),
             );
-            if success {
+            let result = if success {
                 Ok(response_or_err)
             } else {
                 Err(response_or_err)
-            }
-        })
-        .await;
+            };
+            let _ = done_tx.send(result);
+        });
 
-        let formatted = format_send_result(result.map_err(|e| e.to_string()));
-        match formatted {
-            Ok(response) => {
+        // Stream output to Discord by editing a single message every 3 seconds
+        let stream_msg = msg
+            .channel_id
+            .say(&ctx.http, "```\n⏳ Working...\n```")
+            .await;
+        let mut stream_msg = stream_msg.ok();
+        let mut accumulated = String::new();
+        let mut done_rx = done_rx;
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        interval.tick().await; // consume immediate first tick
+
+        let final_result = loop {
+            tokio::select! {
+                result = &mut done_rx => {
+                    // Drain any remaining lines
+                    while let Ok(line) = line_rx.try_recv() {
+                        accumulated.push_str(&line);
+                        accumulated.push('\n');
+                    }
+                    break result;
+                }
+                _ = interval.tick() => {
+                    // Drain available lines
+                    let mut new_lines = false;
+                    while let Ok(line) = line_rx.try_recv() {
+                        accumulated.push_str(&line);
+                        accumulated.push('\n');
+                        new_lines = true;
+                    }
+                    if new_lines
+                        && let Some(ref mut sm) = stream_msg
+                    {
+                        let tail = tail_for_discord(&accumulated, 1900);
+                        let content = format!("```\n{tail}\n```");
+                        let _ = sm
+                            .edit(
+                                &ctx.http,
+                                serenity::builder::EditMessage::new().content(&content),
+                            )
+                            .await;
+                    }
+                }
+            }
+        };
+
+        // Clean up streaming message and typing indicator
+        typing_stop.store(true, Ordering::Relaxed);
+        if let Some(sm) = stream_msg {
+            let _ = sm.delete(&ctx.http).await;
+        }
+
+        // Deliver the final result
+        match final_result {
+            Ok(Ok(response)) => {
+                let _ = msg.delete_reaction_emoji(&ctx, hourglass).await;
+                let _ = msg
+                    .react(&ctx, ReactionType::Unicode("✅".to_string()))
+                    .await;
                 let _ = self.send_to_state_destination(&ctx, &response).await;
             }
-            Err(err) => {
+            Ok(Err(err)) => {
+                let _ = msg.delete_reaction_emoji(&ctx, hourglass).await;
+                let _ = msg
+                    .react(&ctx, ReactionType::Unicode("❌".to_string()))
+                    .await;
                 let _ = self.send_to_state_destination(&ctx, &err).await;
             }
+            Err(_) => {
+                let _ = msg.delete_reaction_emoji(&ctx, hourglass).await;
+                let _ = msg
+                    .react(&ctx, ReactionType::Unicode("❌".to_string()))
+                    .await;
+                let _ = self
+                    .send_to_state_destination(&ctx, "Internal error: task panicked")
+                    .await;
+            }
         }
+    }
+}
+
+/// Returns the last `max_chars` characters of `text`, breaking at a line boundary.
+fn tail_for_discord(text: &str, max_chars: usize) -> &str {
+    if text.len() <= max_chars {
+        return text;
+    }
+    let start = text.len() - max_chars;
+    // Find the next newline after `start` to break cleanly
+    match text[start..].find('\n') {
+        Some(pos) => &text[start + pos + 1..],
+        None => &text[start..],
     }
 }
 
@@ -2409,34 +2527,6 @@ next_run = "2026-02-24T09:00:00"
         ));
     }
 
-    // --- format_send_result tests ---
-
-    #[test]
-    fn format_send_result_ok_ok() {
-        let r = format_send_result(Ok(Ok("response text".into())));
-        assert_eq!(r, Ok("response text".into()));
-    }
-
-    #[test]
-    fn format_send_result_ok_err() {
-        let r = format_send_result(Ok(Err("backend failed".into())));
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("Command failed"));
-    }
-
-    #[test]
-    fn format_send_result_err() {
-        let r = format_send_result(Err("join error".into()));
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("Worker failed"));
-    }
-
-    #[test]
-    fn format_send_result_preserves_original_error() {
-        let r = format_send_result(Ok(Err("specific error text".into())));
-        assert!(r.unwrap_err().contains("specific error text"));
-    }
-
     // --- plan_command_action with custom state ---
 
     #[test]
@@ -3001,21 +3091,6 @@ interval = "1h"
         ));
     }
 
-    // --- more format_send_result tests ---
-
-    #[test]
-    fn format_send_result_empty_ok() {
-        let r = format_send_result(Ok(Ok("".into())));
-        assert_eq!(r, Ok("".into()));
-    }
-
-    #[test]
-    fn format_send_result_empty_err() {
-        let r = format_send_result(Ok(Err("".into())));
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("Command failed"));
-    }
-
     // --- CRON_FILE_HEADER tests ---
 
     #[test]
@@ -3091,5 +3166,31 @@ interval = "1h"
             }
             _ => panic!("expected ErrorToSource"),
         }
+    }
+
+    #[test]
+    fn tail_for_discord_short_text() {
+        let text = "hello world";
+        assert_eq!(tail_for_discord(text, 100), "hello world");
+    }
+
+    #[test]
+    fn tail_for_discord_exact_limit() {
+        let text = "abcde";
+        assert_eq!(tail_for_discord(text, 5), "abcde");
+    }
+
+    #[test]
+    fn tail_for_discord_truncates_to_line_boundary() {
+        let text = "line1\nline2\nline3\nline4\nline5";
+        let result = tail_for_discord(text, 18);
+        // Should break at a newline, showing trailing lines
+        assert!(!result.is_empty());
+        assert!(result.ends_with("line5"));
+    }
+
+    #[test]
+    fn tail_for_discord_empty_text() {
+        assert_eq!(tail_for_discord("", 100), "");
     }
 }

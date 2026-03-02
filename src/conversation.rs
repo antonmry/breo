@@ -686,6 +686,7 @@ pub(crate) fn compact_stats(
     (pct_saved, remaining)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_send_inner(
     message: &str,
     target: Option<&str>,
@@ -694,6 +695,7 @@ pub(crate) fn cmd_send_inner(
     files: &[PathBuf],
     sandbox: Option<&str>,
     stream: bool,
+    line_tx: Option<std::sync::mpsc::Sender<String>>,
 ) -> (String, String, bool) {
     ensure_breo_dir();
     let active = get_active();
@@ -716,7 +718,7 @@ pub(crate) fn cmd_send_inner(
         build_command(backend, model)
     };
     let (stdout, stderr, success) =
-        execute_command_inner(cmd, &prompt, sandbox.is_some(), backend, stream);
+        execute_command_inner(cmd, &prompt, sandbox.is_some(), backend, stream, line_tx);
 
     if !success {
         return (name.to_string(), stderr, false);
@@ -746,7 +748,7 @@ pub(crate) fn cmd_send(
     sandbox: Option<&str>,
 ) -> String {
     let (name, stderr, success) =
-        cmd_send_inner(message, target, model, backend, files, sandbox, true);
+        cmd_send_inner(message, target, model, backend, files, sandbox, true, None);
     if !success {
         let label = if sandbox.is_some() {
             "limactl"
