@@ -1,6 +1,7 @@
 # TODO
 
-- [ ] Shell: send a notification via Discord with a flag (msg and loop)
+- [ ] Shell: reorganize commands and add better help
+- [ ] Add docs
 - [ ] Claws: support loop command
 - [ ] Loop: how to improve it? How to force the E2E test? Avoid spec for testing
 - [ ] Shell: better track of progress?
@@ -29,3 +30,4 @@
 - [x] Claws: support cron commands
 - [x] Claws: Discord channel per project
 - [x] Claws: help should show what text commands are available
+- [x] Shell: send a notification via Discord with a flag (msg and loop)

@@ -334,6 +334,40 @@ pub(crate) fn should_process_message(
     allowed_users.iter().any(|u| u == user_id)
 }
 
+fn resolve_dm_target_user_id(
+    allowed_users: &[String],
+    requested_user_id: Option<&str>,
+) -> Option<u64> {
+    if let Some(user_id) = requested_user_id {
+        if !allowed_users.iter().any(|u| u == user_id) {
+            eprintln!(
+                "[claws] DM target user '{}' is not in allowed_users",
+                user_id
+            );
+            return None;
+        }
+        return match user_id.parse() {
+            Ok(id) => Some(id),
+            Err(_) => {
+                eprintln!("[claws] Invalid DM target user id '{}'", user_id);
+                None
+            }
+        };
+    }
+
+    let Some(first_allowed) = allowed_users.first() else {
+        eprintln!("[claws] No allowed_users configured for DM destination");
+        return None;
+    };
+    match first_allowed.parse() {
+        Ok(id) => Some(id),
+        Err(_) => {
+            eprintln!("[claws] Invalid allowed user id '{}'", first_allowed);
+            None
+        }
+    }
+}
+
 /// Checks whether a message source matches the bot's configured destination.
 /// - `Dm` destination: only accept DMs (guild_id is None).
 /// - `Channel(id)` destination: only accept messages from that specific channel.
@@ -385,7 +419,7 @@ pub(crate) fn mirror_to_discord(
     rt.block_on(async {
         let http = serenity::http::Http::new(&token);
         if let Err(e) =
-            ClawsHandler::send_to_destination(&http, destination, &allowed_users, &text).await
+            ClawsHandler::send_to_destination(&http, destination, &allowed_users, &text, None).await
         {
             eprintln!("[mirror] Failed to send to Discord: {e}");
         }
@@ -637,6 +671,7 @@ impl ClawsHandler {
         destination: &DiscordDestination,
         allowed_users: &[String],
         text: &str,
+        requested_user_id: Option<&str>,
     ) -> serenity::Result<()> {
         match destination {
             DiscordDestination::Channel(channel_id) => {
@@ -652,16 +687,9 @@ impl ClawsHandler {
                 }
             }
             DiscordDestination::Dm => {
-                let Some(first_allowed) = allowed_users.first() else {
-                    eprintln!("[claws] No allowed_users configured for DM destination");
+                let Some(user_id_num) = resolve_dm_target_user_id(allowed_users, requested_user_id)
+                else {
                     return Ok(());
-                };
-                let user_id_num: u64 = match first_allowed.parse() {
-                    Ok(id) => id,
-                    Err(_) => {
-                        eprintln!("[claws] Invalid allowed user id '{}'", first_allowed);
-                        return Ok(());
-                    }
                 };
                 let dm = UserId::new(user_id_num).create_dm_channel(http).await?;
                 for chunk in split_for_discord(text, 2000) {
@@ -672,16 +700,24 @@ impl ClawsHandler {
         Ok(())
     }
 
-    pub(crate) async fn send_to_state_destination(
+    pub(crate) async fn send_to_state_destination_for_user(
         &self,
         ctx: &Context,
         text: &str,
+        requested_user_id: Option<&str>,
     ) -> serenity::Result<()> {
         let (destination, allowed_users) = {
             let state = self.state.lock().await;
             (state.destination.clone(), state.allowed_users.clone())
         };
-        Self::send_to_destination(&ctx.http, &destination, &allowed_users, text).await
+        Self::send_to_destination(
+            &ctx.http,
+            &destination,
+            &allowed_users,
+            text,
+            requested_user_id,
+        )
+        .await
     }
 
     pub(crate) async fn handle_command(
@@ -691,6 +727,8 @@ impl ClawsHandler {
         command: &str,
         arg: &str,
     ) -> serenity::Result<()> {
+        let requester_user_id = msg.author.id.get().to_string();
+
         // Gather context for the pure planning function
         let state = self.state.lock().await;
         let conv_exists = if command == "switch" {
@@ -721,21 +759,36 @@ impl ClawsHandler {
                 set_active(&state.conversation);
                 state.persist();
                 drop(state);
-                self.send_to_state_destination(ctx, &response).await
+                self.send_to_state_destination_for_user(
+                    ctx,
+                    &response,
+                    Some(requester_user_id.as_str()),
+                )
+                .await
             }
             CommandAction::SwitchAgent { backend, response } => {
                 let mut state = self.state.lock().await;
                 state.backend = backend;
                 state.persist();
                 drop(state);
-                self.send_to_state_destination(ctx, &response).await
+                self.send_to_state_destination_for_user(
+                    ctx,
+                    &response,
+                    Some(requester_user_id.as_str()),
+                )
+                .await
             }
             CommandAction::SetModel { model, response } => {
                 let mut state = self.state.lock().await;
                 state.model = Some(model);
                 state.persist();
                 drop(state);
-                self.send_to_state_destination(ctx, &response).await
+                self.send_to_state_destination_for_user(
+                    ctx,
+                    &response,
+                    Some(requester_user_id.as_str()),
+                )
+                .await
             }
             CommandAction::SetDestination {
                 destination,
@@ -745,7 +798,12 @@ impl ClawsHandler {
                 state.destination = destination;
                 state.persist();
                 drop(state);
-                self.send_to_state_destination(ctx, &response).await
+                self.send_to_state_destination_for_user(
+                    ctx,
+                    &response,
+                    Some(requester_user_id.as_str()),
+                )
+                .await
             }
             CommandAction::SetReceiveAll {
                 receive_all,
@@ -755,9 +813,21 @@ impl ClawsHandler {
                 state.receive_all = receive_all;
                 state.persist();
                 drop(state);
-                self.send_to_state_destination(ctx, &response).await
+                self.send_to_state_destination_for_user(
+                    ctx,
+                    &response,
+                    Some(requester_user_id.as_str()),
+                )
+                .await
             }
-            CommandAction::Respond(text) => self.send_to_state_destination(ctx, &text).await,
+            CommandAction::Respond(text) => {
+                self.send_to_state_destination_for_user(
+                    ctx,
+                    &text,
+                    Some(requester_user_id.as_str()),
+                )
+                .await
+            }
             CommandAction::CreateConversation(name) => {
                 let conversation_name = name.clone();
                 let result =
@@ -782,9 +852,10 @@ impl ClawsHandler {
                 state.conversation = name.clone();
                 state.persist();
                 drop(state);
-                self.send_to_state_destination(
+                self.send_to_state_destination_for_user(
                     ctx,
                     &format!("Created and switched to conversation: {name}"),
+                    Some(requester_user_id.as_str()),
                 )
                 .await
             }
@@ -801,9 +872,10 @@ impl ClawsHandler {
                         .send_text_to_source(ctx, msg, &format!("Compaction failed: {e}"))
                         .await;
                 }
-                self.send_to_state_destination(
+                self.send_to_state_destination_for_user(
                     ctx,
                     &format!("Compacted conversation: {conversation_for_msg}"),
+                    Some(requester_user_id.as_str()),
                 )
                 .await
             }
@@ -867,9 +939,14 @@ pub(crate) async fn execute_cron_task(
 
     match send_result {
         Ok(Ok(response)) => {
-            if let Err(e) =
-                ClawsHandler::send_to_destination(&http, &destination, &allowed_users, &response)
-                    .await
+            if let Err(e) = ClawsHandler::send_to_destination(
+                &http,
+                &destination,
+                &allowed_users,
+                &response,
+                None,
+            )
+            .await
             {
                 eprintln!("[cron] Failed to deliver task '{}' output: {e}", task_name);
             }
@@ -886,6 +963,7 @@ pub(crate) async fn execute_cron_task(
                 &destination,
                 &allowed_users,
                 &format!("Cron task '{task_name}' failed: {err}"),
+                None,
             )
             .await;
             complete_cron_task(&task_name, previous_next_run, interval.as_deref());
@@ -897,6 +975,7 @@ pub(crate) async fn execute_cron_task(
                 &destination,
                 &allowed_users,
                 &format!("Cron task '{task_name}' crashed: {err}"),
+                None,
             )
             .await;
             complete_cron_task(&task_name, previous_next_run, interval.as_deref());
@@ -954,7 +1033,9 @@ impl EventHandler for ClawsHandler {
         let is_mention = msg.mentions_me(&ctx).await.unwrap_or(false);
         let msg_channel_id = msg.channel_id.get().to_string();
 
-        // Filter by destination first: silently ignore messages from non-matching sources
+        let user_id = msg.author.id.get().to_string();
+
+        // Filter by destination first.
         let (destination, allowed_users, receive_all) = {
             let state = self.state.lock().await;
             (
@@ -964,10 +1045,17 @@ impl EventHandler for ClawsHandler {
             )
         };
         if !matches_destination(&destination, is_dm, &msg_channel_id) {
+            if !msg.author.bot {
+                eprintln!(
+                    "[claws] Ignored message from user {} in channel {}: destination mismatch (configured: {})",
+                    user_id,
+                    msg_channel_id,
+                    destination.display()
+                );
+            }
             return;
         }
 
-        let user_id = msg.author.id.get().to_string();
         if !should_process_message(
             msg.author.bot,
             is_dm,
@@ -976,6 +1064,24 @@ impl EventHandler for ClawsHandler {
             &user_id,
             &allowed_users,
         ) {
+            if !msg.author.bot {
+                if !is_dm && !is_mention && !receive_all {
+                    eprintln!(
+                        "[claws] Ignored message from user {} in channel {}: no @mention and receive_all=false",
+                        user_id, msg_channel_id
+                    );
+                } else if !allowed_users.iter().any(|u| u == &user_id) {
+                    eprintln!(
+                        "[claws] Ignored message from user {}: not in allowed_users",
+                        user_id
+                    );
+                } else {
+                    eprintln!(
+                        "[claws] Ignored message from user {}: failed message filter",
+                        user_id
+                    );
+                }
+            }
             if !msg.author.bot && (is_dm || is_mention) {
                 let _ = self.send_text_to_source(&ctx, &msg, "Access denied.").await;
             }
@@ -984,6 +1090,12 @@ impl EventHandler for ClawsHandler {
 
         let content = strip_leading_mentions(&msg.content);
         if content.is_empty() {
+            if !msg.author.bot {
+                eprintln!(
+                    "[claws] Ignored message from user {}: content empty after stripping mentions",
+                    user_id
+                );
+            }
             return;
         }
 
@@ -1081,20 +1193,33 @@ impl EventHandler for ClawsHandler {
         }
 
         // Deliver the final result
+        let requester_user_id = msg.author.id.get().to_string();
         match final_result {
             Ok(Ok(response)) => {
                 let _ = msg.delete_reaction_emoji(&ctx, hourglass).await;
                 let _ = msg
                     .react(&ctx, ReactionType::Unicode("✅".to_string()))
                     .await;
-                let _ = self.send_to_state_destination(&ctx, &response).await;
+                let _ = self
+                    .send_to_state_destination_for_user(
+                        &ctx,
+                        &response,
+                        Some(requester_user_id.as_str()),
+                    )
+                    .await;
             }
             Ok(Err(err)) => {
                 let _ = msg.delete_reaction_emoji(&ctx, hourglass).await;
                 let _ = msg
                     .react(&ctx, ReactionType::Unicode("❌".to_string()))
                     .await;
-                let _ = self.send_to_state_destination(&ctx, &err).await;
+                let _ = self
+                    .send_to_state_destination_for_user(
+                        &ctx,
+                        &err,
+                        Some(requester_user_id.as_str()),
+                    )
+                    .await;
             }
             Err(_) => {
                 let _ = msg.delete_reaction_emoji(&ctx, hourglass).await;
@@ -1102,7 +1227,11 @@ impl EventHandler for ClawsHandler {
                     .react(&ctx, ReactionType::Unicode("❌".to_string()))
                     .await;
                 let _ = self
-                    .send_to_state_destination(&ctx, "Internal error: task panicked")
+                    .send_to_state_destination_for_user(
+                        &ctx,
+                        "Internal error: task panicked",
+                        Some(requester_user_id.as_str()),
+                    )
                     .await;
             }
         }
@@ -2525,6 +2654,24 @@ next_run = "2026-02-24T09:00:00"
             "2",
             &["1".into()]
         ));
+    }
+
+    #[test]
+    fn resolve_dm_target_user_id_uses_requested_allowed_user() {
+        let allowed = vec!["1".into(), "2".into(), "3".into()];
+        assert_eq!(resolve_dm_target_user_id(&allowed, Some("2")), Some(2));
+    }
+
+    #[test]
+    fn resolve_dm_target_user_id_rejects_requested_user_not_allowed() {
+        let allowed = vec!["1".into(), "2".into()];
+        assert_eq!(resolve_dm_target_user_id(&allowed, Some("3")), None);
+    }
+
+    #[test]
+    fn resolve_dm_target_user_id_falls_back_to_first_allowed() {
+        let allowed = vec!["99".into(), "100".into()];
+        assert_eq!(resolve_dm_target_user_id(&allowed, None), Some(99));
     }
 
     // --- plan_command_action with custom state ---

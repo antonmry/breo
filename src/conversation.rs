@@ -41,11 +41,49 @@ pub(crate) fn ensure_breo_dir() {
             .stderr(std::process::Stdio::null())
             .status();
     }
+    ensure_git_identity(&base);
 
     let config_path = base.join("config.toml");
     if !config_path.exists() {
         let default_config = "sandbox = true\nsandbox_name = \"default\"\nagent = \"claude\"\n";
         let _ = fs::write(&config_path, default_config);
+    }
+}
+
+fn git_config_get(base: &Path, key: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("config")
+        .arg("--local")
+        .arg("--get")
+        .arg(key)
+        .current_dir(base)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn git_config_set(base: &Path, key: &str, value: &str) {
+    let _ = Command::new("git")
+        .arg("config")
+        .arg("--local")
+        .arg(key)
+        .arg(value)
+        .current_dir(base)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn ensure_git_identity(base: &Path) {
+    if git_config_get(base, "user.name").is_none() {
+        git_config_set(base, "user.name", "breo");
+    }
+    if git_config_get(base, "user.email").is_none() {
+        git_config_set(base, "user.email", "breo@local");
     }
 }
 
@@ -501,6 +539,28 @@ pub(crate) fn git_commit_state() {
             .arg("commit")
             .arg("-m")
             .arg("breo: update state")
+            .current_dir(&base)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+pub(crate) fn git_commit_prompts(message: &str) {
+    let base = breo_dir();
+    let path = base.join("prompts.toml");
+    let status = Command::new("git")
+        .arg("add")
+        .arg(&path)
+        .current_dir(&base)
+        .status();
+    if let Ok(s) = status
+        && s.success()
+    {
+        let _ = Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg(message)
             .current_dir(&base)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -991,6 +1051,35 @@ mod tests {
 
     #[test]
     #[serial]
+    fn ensure_breo_dir_sets_git_identity_when_missing() {
+        with_temp_home(|| {
+            ensure_breo_dir();
+            let base = breo_dir();
+            let name = Command::new("git")
+                .arg("config")
+                .arg("--local")
+                .arg("--get")
+                .arg("user.name")
+                .current_dir(&base)
+                .output()
+                .expect("git config user.name");
+            let email = Command::new("git")
+                .arg("config")
+                .arg("--local")
+                .arg("--get")
+                .arg("user.email")
+                .current_dir(&base)
+                .output()
+                .expect("git config user.email");
+            assert!(name.status.success());
+            assert!(email.status.success());
+            assert_eq!(String::from_utf8_lossy(&name.stdout).trim(), "breo");
+            assert_eq!(String::from_utf8_lossy(&email.stdout).trim(), "breo@local");
+        });
+    }
+
+    #[test]
+    #[serial]
     fn dir_conversations_dir_is_under_conversations() {
         with_temp_home(|| {
             let d = dir_conversations_dir();
@@ -1250,6 +1339,21 @@ mod tests {
         with_temp_home(|| {
             ensure_breo_dir();
             git_commit_state();
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn git_commit_prompts_does_not_panic() {
+        with_temp_home(|| {
+            ensure_breo_dir();
+            let prompts = breo_dir().join("prompts.toml");
+            fs::write(
+                &prompts,
+                "[[prompt]]\nname = \"x\"\nbody = \"y\"\nupdated_at = \"z\"\n",
+            )
+            .expect("write prompts");
+            git_commit_prompts("breo: test prompts");
         });
     }
 

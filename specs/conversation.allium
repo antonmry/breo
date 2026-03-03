@@ -52,6 +52,13 @@ value FileAttachment {
     content: String
 }
 
+-- Reusable prompt saved by the user for quick insertion in future messages.
+entity Prompt {
+    name: String
+    body: String
+    updated_at: DateTime
+}
+
 -- An LLM backend that executes prompts.
 external entity Backend {
     name: String                                     -- claude, codex, gemini
@@ -180,6 +187,41 @@ rule SendMessage {
     ensures: StateCommitted(directory)
 }
 
+-- Sending with a saved prompt prefix (CLI: --prompt <name>).
+-- Composition rules:
+--   prompt + message => "prompt\n\nmessage"
+--   prompt only      => "prompt"
+rule SendMessageWithPromptPrefix {
+    when: SendMessageWithPromptPrefix(
+        directory,
+        conversation_name,
+        prompt_name,
+        message,
+        model,
+        backend,
+        attachments
+    )
+
+    let prompt = Prompt with name = prompt_name
+
+    requires: prompt != null
+
+    let composed_message =
+        if message != null and message.trim != "":
+            prompt.body + "\n\n" + message
+        else:
+            prompt.body
+
+    ensures: SendMessage(
+        directory: directory,
+        conversation_name: conversation_name,
+        message: composed_message,
+        model: model,
+        backend: backend,
+        attachments: attachments
+    )
+}
+
 -- After each message, report context usage to the user.
 rule ReportContextUsage {
     when: _: Exchange.created
@@ -240,6 +282,75 @@ deferred summarize    -- LLM summarization: prose summary, weighted toward recen
 
 
 -- ==========================================================================
+-- Prompt library
+-- ==========================================================================
+
+-- Save a named prompt (from CLI text or editor content).
+rule SavePrompt {
+    when: SavePrompt(name, body)
+
+    requires: body.trim != ""
+    requires: not exists Prompt with name = name
+
+    ensures: Prompt.created(
+        name: name,
+        body: body,
+        updated_at: now()
+    )
+    ensures: PromptsCommitted("save prompt '" + name + "'")
+}
+
+-- Edit an existing prompt body.
+rule EditPrompt {
+    when: EditPrompt(name, body)
+
+    requires: exists Prompt with name = name
+    requires: body.trim != ""
+
+    ensures: Prompt with name = name .body = body
+    ensures: Prompt with name = name .updated_at = now()
+    ensures: PromptsCommitted("edit prompt '" + name + "'")
+}
+
+-- Delete an existing prompt.
+rule DeletePrompt {
+    when: DeletePrompt(name)
+
+    requires: exists Prompt with name = name
+
+    ensures: not exists Prompt with name = name
+    ensures: PromptsCommitted("delete prompt '" + name + "'")
+}
+
+-- List prompts in deterministic name order.
+rule ListPrompts {
+    when: ListPrompts()
+
+    ensures:
+        if Prompt.count = 0:
+            PromptListEmpty()
+        else:
+            PromptListPresented(
+                names: Prompt.sorted_by_name.map(p => p.name)
+            )
+}
+
+-- Fuzzy pick prompt by searching name and body.
+-- Prints only the selected prompt body to stdout.
+rule PickPromptBody {
+    when: PickPromptBody()
+
+    requires: Prompt.count > 0
+
+    let selected = fuzzy_select_prompt(Prompt)
+
+    requires: selected != null
+
+    ensures: PromptBodyPrinted(body: selected.body)
+}
+
+
+-- ==========================================================================
 -- Git versioning
 -- ==========================================================================
 
@@ -260,6 +371,16 @@ rule CommitState {
     ensures: GitCommit(
         scope: state,
         message: "breo: update state"
+    )
+}
+
+-- Prompt library changes are committed to git.
+rule CommitPrompts {
+    when: PromptsCommitted(message)
+
+    ensures: GitCommit(
+        scope: prompts,
+        message: "breo: " + message
     )
 }
 
@@ -289,7 +410,9 @@ deferred sanitize                    -- Path sanitization: keep alphanumeric, da
 deferred hash                        -- Short hash for collision avoidance
 deferred timestamp_name              -- Generate timestamp-based name (YYYY-MM-DD_HH-MM-SS)
 deferred format_attachments          -- Format file attachments as markdown code blocks
-deferred breo_data_dir               -- ~/.local/share/breo (git-tracked data directory)
+deferred breo_data_dir               -- ~/.config/breo (git-tracked data directory)
+deferred now                         -- Current UTC timestamp
+deferred fuzzy_select_prompt         -- fuzzy select over prompt name + prompt body
 
 
 -- ==========================================================================
@@ -305,3 +428,7 @@ deferred breo_data_dir               -- ~/.local/share/breo (git-tracked data di
 -- Auto-push has been removed. Git commits are still automatic after every mutation,
 --   but push/pull are now manual via `breo git push` and `breo git pull`.
 --   This avoids unexpected network operations and gives users control over sync timing.
+-- Prompt library entries are stored in a single `prompts.toml` file and are
+--   committed after save/edit/delete operations so they are included in manual push.
+-- Top-level send supports --prompt <name> to prepend a saved prompt body.
+--   If a message is also provided, breo composes: prompt + blank line + message.

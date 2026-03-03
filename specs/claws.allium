@@ -48,7 +48,6 @@ entity Bot {
     sandbox: Sandbox?
     destination: DiscordDestination
     receive_all: Boolean
-    last_user_id: String?
     status: running | stopped
 }
 
@@ -88,6 +87,7 @@ rule StartBot {
     let profile = config.discord_bots with name = bot_name
 
     requires: profile != null
+    requires: profile.allowed_users.count > 0
 
     ensures: Bot.created(
         profile: profile,
@@ -98,7 +98,6 @@ rule StartBot {
         sandbox: ResolvedSandbox(state),
         destination: ResolvedDiscordDestination(state, profile),
         receive_all: ResolvedReceiveAll(state),
-        last_user_id: null,
         status: running
     )
     ensures: BotConnected(bot)
@@ -119,10 +118,11 @@ rule StopBot {
 -- Message handling
 -- ==========================================================================
 
--- A Discord message directed at the bot (DM or @mention in a channel).
--- All messages go to the bot's current conversation regardless of source.
+-- A Discord message considered for bot processing.
+-- Sources can be DMs, @mentions in channels, or regular channel messages
+-- (regular channel messages are accepted only when receive_all is true).
+-- Non-command messages go to the bot's current conversation.
 -- Only allowed users (per bot profile) can interact with the bot.
--- The bot tracks the last authorized user ID for cron DM delivery fallback.
 rule HandleDiscordMessage {
     when: DiscordMessageReceived(bot, message, source)
 
@@ -130,15 +130,14 @@ rule HandleDiscordMessage {
     requires: message.source.user_id in bot.profile.allowed_users
     requires: matches_destination(bot.destination, message.source)
     requires: should_process_message(bot, message.source)
-
-    -- Track last authorized user for cron DM fallback
-    ensures: bot.last_user_id = message.source.user_id
+    requires: strip_leading_mentions(message.content).trim != ""
+    requires: parse_bot_command(strip_leading_mentions(message.content)) = null
 
     -- Delegate to breo's SendMessage (conversation.allium)
     ensures: SendMessage(
         directory: bot.directory,
         conversation_name: bot.conversation.name,
-        message: message.content,
+        message: strip_leading_mentions(message.content),
         model: bot.model,
         backend: bot.backend,
         attachments: []
@@ -150,19 +149,19 @@ rule HandleDiscordMessage {
 
     ensures:
         for chunk in chunks:
-            DeliverToDestination(bot.destination, chunk)
+            DeliverToDestinationForUser(bot.destination, message.source.user_id, chunk)
 }
 
--- Where a Discord message came from (DM or channel).
+-- Where a Discord message came from.
 value MessageSource {
-    kind: direct_message | channel_mention
+    kind: direct_message | channel_mention | channel
     channel_id: String
     user_id: String
 }
 
 -- Source filtering: each bot instance only processes messages from its destination.
 -- Dm destination → only DMs. Channel(id) destination → only that channel.
--- Messages from other sources are silently ignored (no "Access denied").
+-- Messages from other sources are ignored; claws logs the discard reason.
 rule matches_destination(destination, source) {
     match destination {
         Dm        => source.kind = direct_message
@@ -180,17 +179,49 @@ rule should_process_message(bot, source) {
     }
 }
 
--- Reject messages from unauthorized users.
+-- Reject messages from unauthorized users with "Access denied." only when the
+-- source is a DM or explicit @mention in the configured destination.
 rule RejectUnauthorizedMessage {
     when: DiscordMessageReceived(bot, message, source)
 
     requires: bot.status = running
+    requires: matches_destination(bot.destination, message.source)
+    requires: source.kind in { direct_message, channel_mention }
     requires: message.source.user_id not in bot.profile.allowed_users
 
     ensures: DiscordMessageSent(
         target: message.source,
         content: "Access denied."
     )
+}
+
+-- Discard diagnostics are logged for non-bot messages.
+rule LogDiscardedMessage {
+    when: DiscordMessageReceived(bot, message, source)
+
+    requires: bot.status = running
+
+    ensures:
+        if not matches_destination(bot.destination, message.source):
+            MessageDiscardedLogged(
+                user_id: source.user_id,
+                reason: destination_mismatch
+            )
+        else if source.kind = channel and not bot.receive_all:
+            MessageDiscardedLogged(
+                user_id: source.user_id,
+                reason: no_mention_and_receive_all_off
+            )
+        else if source.user_id not in bot.profile.allowed_users:
+            MessageDiscardedLogged(
+                user_id: source.user_id,
+                reason: unauthorized_user
+            )
+        else if strip_leading_mentions(message.content).trim = "":
+            MessageDiscardedLogged(
+                user_id: source.user_id,
+                reason: empty_content_after_strip
+            )
 }
 
 
@@ -248,7 +279,7 @@ rule BotSwitchModel {
 }
 
 -- Switch the Discord destination (channel or DM) from Discord.
--- Accepts a channel ID or "dm" (DM to first allowed user).
+-- Accepts a channel ID or "dm".
 rule BotSwitchDestination {
     when: BotCommand(bot, "destination", target)
 
@@ -268,7 +299,7 @@ rule BotSwitchDestination {
         target: command.source,
         content:
             if target = "dm":
-                "Destination set to: DM"
+                "Destination set to: dm"
             else:
                 "Destination set to: channel " + target
     )
@@ -367,9 +398,9 @@ rule BotReceiveAll {
         target: command.source,
         content:
             if new_value:
-                "Receive all: on (processing all messages in channel)"
+                "receive_all set to: on"
             else:
-                "Receive all: off (only processing @mentions)"
+                "receive_all set to: off"
     )
 }
 
@@ -579,7 +610,11 @@ rule MirrorToDiscord {
 -- ==========================================================================
 
 deferred split_message               -- split text into chunks of at most N characters
-deferred DeliverToDestination        -- send message to a DiscordDestination (channel or DM)
+deferred DeliverToDestination        -- send message to a DiscordDestination; DM uses first allowed user fallback
+deferred DeliverToDestinationForUser -- send message to destination preferring a specific allowed user for DM
+deferred strip_leading_mentions      -- remove leading Discord mentions from message content
+deferred parse_bot_command           -- parse !commands from message content
+deferred MessageDiscardedLogged      -- debug log for discarded incoming message with reason
 deferred BotConnected                -- establish Discord websocket connection
 deferred BotDisconnected             -- close Discord websocket connection
 deferred CronLoopStarted             -- start background cron polling loop
@@ -597,7 +632,9 @@ deferred save_cron_file              -- write updated CronFile back to .breo/cro
 --   `breo claws list` shows all configured bots.
 --   Bot name argument supports shell auto-completion from configured profiles.
 --   Each profile has its own token, guild, and access list.
--- All messages (DM and channel mention) go to the bot's current conversation.
+-- DMs and channel messages in the configured destination can be processed.
+--   Channel messages require @mention unless receive_all is enabled.
+--   Accepted messages are routed to the bot's current conversation.
 -- Long responses are split into multiple Discord messages (2000 char limit).
 -- Configuration commands are nice-to-have, not core functionality.
 -- Bot commands use text prefixes (!switch, !agent, !status, etc.), not Discord
@@ -616,7 +653,9 @@ deferred save_cron_file              -- write updated CronFile back to .breo/cro
 -- Tasks always use the bot's active conversation. No per-task conversation targeting.
 -- Responses (both interactive and cron) are delivered to the bot's configured
 --   Discord destination — either a channel or DM. Set via -d flag or !destination.
---   Default is DM to the first user in the bot's allowed_users list.
+--   For interactive responses with DM destination, claws targets the requesting
+--   allowed user. For background deliveries (cron/mirror), claws uses the first
+--   allowed user as fallback DM recipient.
 --   Destination is stored in per-directory state and persists across invocations.
 -- One-shot tasks are removed from the file after execution.
 -- Periodic tasks get next_run recalculated (next_run + interval) and stay in the file.
@@ -629,8 +668,7 @@ deferred save_cron_file              -- write updated CronFile back to .breo/cro
 -- receive_all controls whether the bot processes all channel messages or only @mentions.
 --   Resolution cascade: CLI --receive-all > directory state > false.
 --   Toggled via !receive-all [on|off] (omit argument to toggle). Persisted to state.
--- last_user_id tracks the most recent authorized user who interacted with the bot.
---   Used as fallback for cron task DM delivery when no explicit user_id is set on the task.
---   Updated on every authorized message. Skips the bot's own user ID.
+-- Discarded incoming messages are logged with a reason (destination mismatch,
+--   no mention with receive_all off, unauthorized user, empty content after strip).
 -- Auto-push has been removed. Git commits are still automatic, but push/pull
 --   are now manual via `breo git push` and `breo git pull`.

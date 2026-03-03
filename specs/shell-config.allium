@@ -3,7 +3,7 @@
 
 -- Scope: Shell integration and configuration management
 -- Includes: Global config, per-directory state, resolution cascades,
---           shell completions, fuzzy picker
+--           shell completions, conversation fuzzy picker, prompt prefix composition
 -- Excludes:
 --   - Conversation content and lifecycle (see conversation.allium)
 --   - Loop execution (see loop.allium)
@@ -157,6 +157,38 @@ rule ResolveBotMirror {
     )
 }
 
+-- Prompt prefix resolution: CLI --prompt <name> resolves to saved prompt body.
+-- No directory-state fallback: prompt prefix is per-invocation only.
+rule ResolvePromptPrefix {
+    when: ResolvePromptPrefix(cli_prompt_name)
+
+    ensures: ResolvedPromptPrefix(
+        prompt_body:
+            if cli_prompt_name != null:
+                prompt_body_for_name(cli_prompt_name)
+            else:
+                null
+    )
+}
+
+-- Outgoing message composition for top-level send:
+--   prompt + message => "prompt\n\nmessage"
+--   prompt only      => "prompt"
+--   message only     => "message"
+rule ComposeOutgoingMessage {
+    when: ComposeOutgoingMessage(prompt_body, raw_message)
+
+    ensures: ComposedMessage(
+        message:
+            if prompt_body != null and raw_message != null:
+                prompt_body + "\n\n" + raw_message
+            else if prompt_body != null:
+                prompt_body
+            else:
+                raw_message
+    )
+}
+
 
 -- ==========================================================================
 -- State persistence
@@ -226,6 +258,17 @@ rule ConversationPicked {
     ensures: StateCommitted(directory)
 }
 
+-- Prompt completion is opt-in: only when completing the --prompt flag value.
+-- Completion candidates are prompt names (not prompt bodies).
+rule CompletePromptFlagValues {
+    when: CompletePromptFlagValues()
+
+    ensures: CompletionCandidates(
+        flag: "--prompt",
+        values: Prompt.sorted_by_name.map(p => p.name)
+    )
+}
+
 
 -- ==========================================================================
 -- Status display
@@ -258,6 +301,7 @@ rule ShowStatus {
 
 deferred generate_completion_script    -- shell-specific completion script generation
 deferred breo_config_dir               -- ~/.config/breo
+deferred prompt_body_for_name          -- prompt lookup by name in prompts.toml
 deferred directory_conversations_path  -- ~/.config/breo/conversations/<dir-id>
 
 
@@ -277,7 +321,10 @@ deferred directory_conversations_path  -- ~/.config/breo/conversations/<dir-id>
 -- Per-directory state includes bot (which bot profile mirrors CLI/loop output to Discord).
 --   Resolution cascade: --no-bot (force off) > CLI --bot > directory state > null (no mirroring).
 --   --no-bot clears the bot from state (persists the removal).
--- Fuzzy picker filters by conversation name only. Content search is out of scope.
+-- Prompt prefix is opt-in via --prompt <name>; no automatic prompt-body insertion
+--   in shell completion.
+-- Shell completion for --prompt returns prompt names only.
+-- Conversation fuzzy picker filters by conversation name only. Content search is out of scope.
 -- No per-directory config files. Global config (~/.config/breo/config.toml) only.
 
 -- ==========================================================================

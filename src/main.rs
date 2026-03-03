@@ -2,6 +2,7 @@ mod claws;
 mod config;
 mod conversation;
 mod loop_cmd;
+mod prompt;
 mod sandbox;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -20,6 +21,10 @@ use crate::conversation::{
     cmd_compact, cmd_list, cmd_new, cmd_pick, cmd_rename, cmd_send_inner, git_pull, git_push,
 };
 use crate::loop_cmd::cmd_loop;
+use crate::prompt::{
+    cmd_prompt_delete, cmd_prompt_edit, cmd_prompt_list, cmd_prompt_pick, cmd_prompt_save,
+    list_prompts, prompt_body_by_name,
+};
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +35,10 @@ use crate::loop_cmd::cmd_loop;
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     message: Option<String>,
+
+    /// Prepend a saved prompt body by name
+    #[arg(long, add = ArgValueCandidates::new(list_prompts))]
+    prompt: Option<String>,
 
     #[arg(short, long, add = ArgValueCandidates::new(list_conversations))]
     conversation: Option<String>,
@@ -71,6 +80,30 @@ enum GitAction {
     Push,
     /// Pull conversations from the remote repository
     Pull,
+}
+
+#[derive(Subcommand)]
+enum PromptAction {
+    /// Save a prompt by name (uses [text] or opens $EDITOR when omitted)
+    Save {
+        name: String,
+        #[arg(num_args = 0.., trailing_var_arg = true)]
+        text: Vec<String>,
+    },
+    /// List saved prompt names
+    List,
+    /// Edit an existing prompt in $EDITOR
+    Edit {
+        #[arg(add = ArgValueCandidates::new(list_prompts))]
+        name: String,
+    },
+    /// Delete a prompt by name
+    Delete {
+        #[arg(add = ArgValueCandidates::new(list_prompts))]
+        name: String,
+    },
+    /// Fuzzy pick a prompt and print its body to stdout
+    Pick,
 }
 
 #[derive(Subcommand)]
@@ -131,6 +164,11 @@ enum Commands {
     Git {
         #[command(subcommand)]
         action: GitAction,
+    },
+    /// Manage reusable prompts
+    Prompt {
+        #[command(subcommand)]
+        action: PromptAction,
     },
     #[command(long_about = "\
 Start the Discord bot bridge for the current directory.
@@ -210,6 +248,16 @@ fn resolve_backend(
 
 fn resolve_model(cli_model: Option<String>, dir_state_model: Option<String>) -> Option<String> {
     cli_model.or(dir_state_model)
+}
+
+fn compose_message(prompt: Option<&str>, message: Option<&str>) -> Option<String> {
+    let msg = message.filter(|m| !m.trim().is_empty());
+    match (prompt, msg) {
+        (Some(p), Some(m)) => Some(format!("{p}\n\n{m}")),
+        (Some(p), None) => Some(p.to_string()),
+        (None, Some(m)) => Some(m.to_string()),
+        (None, None) => None,
+    }
 }
 
 fn resolve_destination(
@@ -312,6 +360,16 @@ fn main() {
     let sandbox = sandbox_name.as_deref();
 
     let resolved_model: Option<String> = resolve_model(cli.model.clone(), dir_state.model.clone());
+    let resolved_prompt = cli
+        .prompt
+        .as_deref()
+        .map(|name| match prompt_body_by_name(name) {
+            Ok(body) => body,
+            Err(msg) => {
+                eprintln!("{msg}");
+                std::process::exit(1);
+            }
+        });
     let resolved_bot = resolve_bot(cli.no_bot, cli.bot.clone(), dir_state.bot.clone());
     let bot_profile: Option<DiscordBotProfile> = resolved_bot
         .as_ref()
@@ -345,6 +403,20 @@ fn main() {
         (_, Some(Commands::Git { action })) => match action {
             GitAction::Push => git_push(),
             GitAction::Pull => git_pull(),
+        },
+        (_, Some(Commands::Prompt { action })) => match action {
+            PromptAction::Save { name, text } => {
+                let text = if text.is_empty() {
+                    None
+                } else {
+                    Some(text.join(" "))
+                };
+                cmd_prompt_save(&name, text.as_deref());
+            }
+            PromptAction::List => cmd_prompt_list(),
+            PromptAction::Edit { name } => cmd_prompt_edit(&name),
+            PromptAction::Delete { name } => cmd_prompt_delete(&name),
+            PromptAction::Pick => cmd_prompt_pick(),
         },
         (
             _,
@@ -444,8 +516,10 @@ fn main() {
             save_after_send(&name);
         }
         (Some(message), None) => {
+            let effective_message = compose_message(resolved_prompt.as_deref(), Some(&message))
+                .expect("message arm always has message");
             let (name, response, success) = cmd_send_inner(
-                &message,
+                &effective_message,
                 cli.conversation.as_deref(),
                 resolved_model.as_deref(),
                 &backend,
@@ -464,7 +538,12 @@ fn main() {
                 std::process::exit(1);
             }
             if let Some(ref profile) = bot_profile {
-                mirror_to_discord(profile, &resolved_destination, &message, &response);
+                mirror_to_discord(
+                    profile,
+                    &resolved_destination,
+                    &effective_message,
+                    &response,
+                );
             }
             save_after_send(&name);
         }
@@ -473,9 +552,13 @@ fn main() {
                 let mut input = String::new();
                 io::stdin().read_to_string(&mut input).unwrap_or_default();
                 let input = input.trim();
-                if !input.is_empty() {
+                let effective_input = compose_message(
+                    resolved_prompt.as_deref(),
+                    if input.is_empty() { None } else { Some(input) },
+                );
+                if let Some(effective_input) = effective_input {
                     let (name, response, success) = cmd_send_inner(
-                        input,
+                        &effective_input,
                         cli.conversation.as_deref(),
                         resolved_model.as_deref(),
                         &backend,
@@ -494,11 +577,48 @@ fn main() {
                         std::process::exit(1);
                     }
                     if let Some(ref profile) = bot_profile {
-                        mirror_to_discord(profile, &resolved_destination, input, &response);
+                        mirror_to_discord(
+                            profile,
+                            &resolved_destination,
+                            &effective_input,
+                            &response,
+                        );
                     }
                     save_after_send(&name);
                     return;
                 }
+            } else if let Some(effective_message) =
+                compose_message(resolved_prompt.as_deref(), None)
+            {
+                let (name, response, success) = cmd_send_inner(
+                    &effective_message,
+                    cli.conversation.as_deref(),
+                    resolved_model.as_deref(),
+                    &backend,
+                    &cli.files,
+                    sandbox,
+                    true,
+                    None,
+                );
+                if !success {
+                    let label = if sandbox.is_some() {
+                        "limactl"
+                    } else {
+                        crate::config::backend_name(&backend)
+                    };
+                    eprintln!("{label} failed: {response}");
+                    std::process::exit(1);
+                }
+                if let Some(ref profile) = bot_profile {
+                    mirror_to_discord(
+                        profile,
+                        &resolved_destination,
+                        &effective_message,
+                        &response,
+                    );
+                }
+                save_after_send(&name);
+                return;
             }
             Cli::command().print_help().expect("print help");
             println!();
@@ -569,6 +689,30 @@ mod tests {
     fn resolve_sandbox_none_when_disabled() {
         let s = resolve_sandbox(false, None, None, false, "default");
         assert!(s.is_none());
+    }
+
+    #[test]
+    fn compose_message_prompt_and_message() {
+        let composed = compose_message(Some("prompt body"), Some("user message"));
+        assert_eq!(composed.as_deref(), Some("prompt body\n\nuser message"));
+    }
+
+    #[test]
+    fn compose_message_prompt_only() {
+        let composed = compose_message(Some("prompt body"), None);
+        assert_eq!(composed.as_deref(), Some("prompt body"));
+    }
+
+    #[test]
+    fn compose_message_message_only() {
+        let composed = compose_message(None, Some("user message"));
+        assert_eq!(composed.as_deref(), Some("user message"));
+    }
+
+    #[test]
+    fn compose_message_none_when_empty() {
+        assert!(compose_message(None, None).is_none());
+        assert!(compose_message(None, Some("   ")).is_none());
     }
 
     #[test]
@@ -1271,6 +1415,14 @@ mod tests {
     }
 
     #[test]
+    fn cli_parse_message_with_prompt_flag() {
+        let cli = Cli::try_parse_from(["breo", "--prompt", "greeting", "hello"]).expect("parse");
+        assert_eq!(cli.prompt.as_deref(), Some("greeting"));
+        assert_eq!(cli.message.as_deref(), Some("hello"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
     fn cli_parse_git_push() {
         let cli = Cli::try_parse_from(["breo", "git", "push"]).expect("parse");
         assert!(matches!(
@@ -1288,6 +1440,79 @@ mod tests {
             cli.command,
             Some(Commands::Git {
                 action: GitAction::Pull
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parse_prompt_save_with_text() {
+        let cli =
+            Cli::try_parse_from(["breo", "prompt", "save", "greeting", "hello"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Prompt {
+                action: PromptAction::Save { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parse_prompt_save_with_multitoken_text() {
+        let cli = Cli::try_parse_from([
+            "breo", "prompt", "save", "greeting", "hello", "from", "breo",
+        ])
+        .expect("parse");
+        match cli.command {
+            Some(Commands::Prompt {
+                action: PromptAction::Save { name, text },
+            }) => {
+                assert_eq!(name, "greeting");
+                assert_eq!(text, vec!["hello", "from", "breo"]);
+            }
+            _ => panic!("expected prompt save"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_prompt_list() {
+        let cli = Cli::try_parse_from(["breo", "prompt", "list"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Prompt {
+                action: PromptAction::List
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parse_prompt_edit() {
+        let cli = Cli::try_parse_from(["breo", "prompt", "edit", "greeting"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Prompt {
+                action: PromptAction::Edit { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parse_prompt_delete() {
+        let cli = Cli::try_parse_from(["breo", "prompt", "delete", "greeting"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Prompt {
+                action: PromptAction::Delete { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parse_prompt_pick() {
+        let cli = Cli::try_parse_from(["breo", "prompt", "pick"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Prompt {
+                action: PromptAction::Pick
             })
         ));
     }

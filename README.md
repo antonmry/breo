@@ -71,8 +71,13 @@ breo -f src/main.rs "Review this code"
 | `breo loop <plan> <verification>` | Run an implement/validate loop                       |
 | `breo claws <bot>`                | Start a Discord bridge for a named bot profile       |
 | `breo claws list`                 | List configured bot profiles                         |
-| `breo git push`                   | Push conversations to the remote repository          |
-| `breo git pull`                   | Pull conversations from the remote repository        |
+| `breo prompt save <name> [text]`  | Save a reusable prompt                               |
+| `breo prompt list`                | List saved prompts                                   |
+| `breo prompt edit <name>`         | Edit a prompt in `$EDITOR`                           |
+| `breo prompt delete <name>`       | Delete a prompt                                      |
+| `breo prompt pick`                | Fuzzy-pick a prompt body (for manual/scripting use)  |
+| `breo git push`                   | Push breo data to the remote repository              |
+| `breo git pull`                   | Pull breo data from the remote repository            |
 
 ## Options
 
@@ -84,6 +89,7 @@ breo -f src/main.rs "Review this code"
 | `-f, --files <path>...`     | Attach files to the prompt                       |
 | `-s, --sandbox <name>`      | Lima VM instance name                            |
 | `--no-sandbox`              | Disable sandbox mode                             |
+| `--prompt <name>`           | Prepend a saved prompt body by name              |
 | `-b, --bot <name>`          | Mirror messages and responses to Discord via a bot profile |
 | `--no-bot`                  | Disable Discord mirroring and clear from state   |
 | `-d, --destination <target>`| Discord destination for mirroring (channel ID or "dm") |
@@ -166,11 +172,40 @@ breo compact rust-questions  # compact a specific one
 This uses Claude to summarize the conversation, preserving key decisions, code
 snippets, and current state while reducing token count.
 
+## Prompt Library
+
+Prompts are stored in `~/.config/breo/prompts.toml` and are versioned in the
+same git repository as conversations/state.
+
+```bash
+# Save directly from CLI text
+breo prompt save greeting "Write a warm greeting for a teammate"
+
+# Save using $VISUAL/$EDITOR (falls back to vi)
+breo prompt save code-review
+
+# List prompts
+breo prompt list
+
+# Edit/delete
+breo prompt edit greeting
+breo prompt delete greeting
+
+# Fuzzy pick prompt body (name + body search)
+breo prompt pick
+
+# Use a saved prompt as message prefix
+breo --prompt greeting "Now tailor this for a release note"
+
+# Send only the saved prompt body
+breo --prompt greeting
+```
+
 ## Git Integration
 
-All conversations are automatically version-controlled in a git repository at
-`~/.config/breo/`. Every message, new conversation, and compaction triggers a
-commit. Push and pull are manual:
+breo data is version-controlled in a git repository at `~/.config/breo/`.
+Conversation updates and prompt library mutations are committed automatically.
+Push and pull are manual:
 
 ```bash
 breo git push    # push conversations to remote
@@ -296,7 +331,7 @@ Options for loop:
 
 ## Shell Completion
 
-Set up fuzzy TAB completion with skim:
+Set up TAB completion:
 
 ```bash
 # Bash - add to ~/.bashrc
@@ -309,7 +344,11 @@ eval "$(breo setup zsh)"
 breo setup fish | source
 ```
 
-This provides fuzzy-matching conversation names when using `-c` or `compact`.
+This provides:
+
+- Fuzzy conversation picking for `-c/--conversation` and `breo compact`.
+- Standard argument completion for all flags/subcommands.
+- Prompt-name completion when using `--prompt`.
 
 ## Configuration
 

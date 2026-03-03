@@ -273,8 +273,8 @@ pub(crate) fn cmd_status() {
     println!("bot:          {bot}");
 }
 
-pub(crate) fn cmd_setup(shell: &ShellType) {
-    let script = match shell {
+pub(crate) fn setup_script(shell: &ShellType) -> &'static str {
+    match shell {
         ShellType::Bash => {
             r#"# breo bash completion with fuzzy pick
 # 1. Source clap completions (defines _clap_complete_breo)
@@ -283,9 +283,10 @@ source <(COMPLETE=bash breo)
 # 2. Override with our skim-powered wrapper
 _breo_with_pick() {
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    local first="${COMP_WORDS[1]}"
 
     if [[ "$prev" == "-c" || "$prev" == "--conversation" ]] || \
-       [[ "${COMP_WORDS[1]}" == "compact" && $COMP_CWORD -eq 2 ]]; then
+       [[ "$first" == "compact" && $COMP_CWORD -eq 2 ]]; then
         local pick
         pick=$(breo pick </dev/tty 2>/dev/tty)
         if [[ -n "$pick" ]]; then
@@ -305,7 +306,9 @@ source <(COMPLETE=zsh breo)
 
 # 2. Override with our skim-powered wrapper
 _breo_with_pick() {
-    if [[ "${words[-2]}" == "-c" || "${words[-2]}" == "--conversation" ]] || \
+    local prev="${words[CURRENT-1]}"
+
+    if [[ "$prev" == "-c" || "$prev" == "--conversation" ]] || \
        [[ "${words[2]}" == "compact" && $CURRENT -eq 3 ]]; then
         local pick
         pick=$(breo pick </dev/tty 2>/dev/tty)
@@ -314,6 +317,7 @@ _breo_with_pick() {
         fi
         return
     fi
+
     _clap_dynamic_completer_breo "$@"
 }
 compdef _breo_with_pick breo"#
@@ -329,8 +333,11 @@ end
 complete -c breo -l conversation -s c -x -a '(__breo_pick_conversation)'
 complete -c breo -n '__fish_seen_subcommand_from compact' -x -a '(__breo_pick_conversation)'"#
         }
-    };
-    println!("{script}");
+    }
+}
+
+pub(crate) fn cmd_setup(shell: &ShellType) {
+    println!("{}", setup_script(shell));
 }
 
 pub(crate) fn backend_name(backend: &Backend) -> &'static str {
@@ -546,18 +553,23 @@ mod tests {
 
     #[test]
     fn cmd_setup_bash_output() {
-        // cmd_setup prints to stdout; just verify it doesn't panic
-        cmd_setup(&ShellType::Bash);
+        let script = setup_script(&ShellType::Bash);
+        assert!(script.contains("breo pick"));
+        assert!(!script.contains("breo prompt pick"));
     }
 
     #[test]
     fn cmd_setup_zsh_output() {
-        cmd_setup(&ShellType::Zsh);
+        let script = setup_script(&ShellType::Zsh);
+        assert!(script.contains("breo pick"));
+        assert!(!script.contains("breo prompt pick"));
     }
 
     #[test]
     fn cmd_setup_fish_output() {
-        cmd_setup(&ShellType::Fish);
+        let script = setup_script(&ShellType::Fish);
+        assert!(script.contains("__breo_pick_conversation"));
+        assert!(!script.contains("__breo_pick_prompt"));
     }
 
     #[test]
